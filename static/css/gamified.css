@@ -18,7 +18,8 @@ body {
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     min-height: 100vh;
     position: relative;
-    overflow-x: hidden;
+    overflow-x: hidden; /* prevent accidental horizontal scroll */
+    -webkit-text-size-adjust: 100%; /* iOS text scaling */
 }
 
 .bg-gradient {
@@ -158,6 +159,22 @@ body {
 .btn-observation {
     background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%);
     color: white;
+}
+
+/* TTS (Text-to-Speech) Button */
+.btn-tts {
+    background: linear-gradient(135deg, #16a085 0%, #1abc9c 100%);
+    color: #ffffff;
+    border: none;
+    border-radius: 15px;
+    padding: 12px 20px;
+    font-weight: 600;
+}
+
+.btn-tts:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 25px rgba(26, 188, 156, 0.35);
+    color: #ffffff;
 }
 
 .btn-module:hover {
@@ -415,6 +432,14 @@ body {
 }
 
 /* Responsive Design */
+@media (max-width: 992px) {
+    .points-display, .streak-display { display: inline-block; margin-top: 8px; }
+    .feature-item { padding: 0.75rem; }
+    .game-card { padding: 1.5rem; }
+    .module-card { padding: 1.25rem; }
+    .floating-element { font-size: 1.6rem; }
+}
+
 @media (max-width: 768px) {
     .features-grid {
         grid-template-columns: 1fr 1fr;
@@ -425,14 +450,36 @@ body {
         font-size: 1.5rem;
     }
     
-    .game-card {
-        padding: 1.5rem;
+    .game-card { padding: 1.25rem; }
+    .module-card { padding: 1rem; }
+    .btn, .btn-game-primary, .btn-game-secondary, .btn-speaking, .btn-listening, .btn-writing, .btn-observation {
+        width: 100%;
     }
-    
-    .module-card {
-        padding: 1rem;
-    }
+    .points-display, .streak-display { width: 100%; text-align: center; }
+    .floating-elements { display: none; } /* reduce distractions and CPU on small devices */
 }
+
+@media (max-width: 576px) {
+    .features-grid { grid-template-columns: 1fr; }
+    .game-card { padding: 1rem; border-radius: 14px; }
+    .module-card { padding: 0.9rem; border-radius: 12px; }
+    .robot-character { width: 120px; height: 120px; font-size: 3rem; }
+}
+
+/* Reduce animations for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+}
+
+/* Utility: make images/videos responsive inside cards */
+.game-card img, .game-card video, .game-card iframe { max-width: 100%; height: auto; border-radius: 12px; }
+
+/* Responsive tables */
+.table { width: 100%; }
+.table-responsive { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Certificate preview responsiveness (when present) */
+.certificate-preview { max-width: 100%; box-sizing: border-box; }
 
 /* Copy Prevention */
 .no-copy {

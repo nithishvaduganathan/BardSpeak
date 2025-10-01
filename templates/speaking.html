@@ -17,7 +17,7 @@
                     <div class="row align-items-center">
                         <div class="col-md-8">
                             <h2><i class="fas fa-microphone me-2" style="color: var(--speaking-color);"></i>Speaking Practice</h2>
-                            <p class="mb-0">Read famous biographies and improve your pronunciation skills!</p>
+                            <p class="mb-0">Practice speaking with curated passages and improve your pronunciation!</p>
                         </div>
                         <div class="col-md-4 text-end">
                             <a href="{{ url_for('dashboard') }}" class="btn btn-outline-primary">
@@ -48,7 +48,7 @@
                     <div class="row">
                         <div class="col-md-3 text-center mb-3">
                             <i class="fas fa-book-open fa-2x mb-2" style="color: var(--speaking-color);"></i>
-                            <p><strong>Step 1:</strong> Choose a biography</p>
+                            <p><strong>Step 1:</strong> Choose a speaking passage</p>
                         </div>
                         <div class="col-md-3 text-center mb-3">
                             <i class="fas fa-microphone fa-2x mb-2" style="color: var(--speaking-color);"></i>
@@ -67,10 +67,10 @@
             </div>
         </div>
 
-        <!-- Available Biographies -->
+        <!-- Available Speaking Passages -->
         <div class="row">
             <div class="col-12">
-                <h4 class="text-center text-white mb-4">🌟 Famous Personalities</h4>
+                <h4 class="text-center text-white mb-4">🎤 Speaking Passages</h4>
             </div>
             
             {% for biography in biographies %}
@@ -117,8 +117,8 @@
         <div class="row">
             <div class="col-12">
                 <div class="game-card text-center">
-                    <h5>No biographies available yet!</h5>
-                    <p>Ask your admin to add some inspiring biographies for practice.</p>
+                    <h5>No speaking passages available yet!</h5>
+                    <p>Ask your admin to add speaking passages for practice.</p>
                     <a href="{{ url_for('dashboard') }}" class="btn btn-game-primary">
                         <i class="fas fa-home me-2"></i>Back to Dashboard
                     </a>

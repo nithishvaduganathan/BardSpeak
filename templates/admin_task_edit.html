@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Edit Task - Shakespeare Club</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/gamified.css') }}">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gradient admin-page">
+    <div class="container py-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="mb-0"><i class="fas fa-edit me-2"></i>Edit Task</h2>
+            <div>
+                <a href="{{ url_for('admin_tasks') }}" class="btn btn-outline-light">
+                    <i class="fas fa-arrow-left me-2"></i>Back to Tasks
+                </a>
+            </div>
+        </div>
+
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                {% for message in messages %}
+                    <div class="alert alert-info game-alert alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" style="filter: invert(1);"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="row g-3">
+            <div class="col-lg-6">
+                <div class="game-card">
+                    <h5 class="mb-3">Task Details</h5>
+                    <form method="post">
+                        <div class="mb-3">
+                            <label class="form-label">Title</label>
+                            <input type="text" class="form-control" name="title" value="{{ task.title }}" required>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Description</label>
+                            <textarea class="form-control" name="description" rows="3">{{ task.description }}</textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Link to Practice (optional)</label>
+                            <select class="form-select" name="module_type" id="module_type_select">
+                                <option value="" {{ '' == task.module_type and 'selected' or '' }}>None</option>
+                                <option value="speaking" {{ task.module_type == 'speaking' and 'selected' or '' }}>Speaking</option>
+                                <option value="listening" {{ task.module_type == 'listening' and 'selected' or '' }}>Listening</option>
+                                <option value="observation" {{ task.module_type == 'observation' and 'selected' or '' }}>Observation</option>
+                                <option value="writing" {{ task.module_type == 'writing' and 'selected' or '' }}>Writing</option>
+                            </select>
+                        </div>
+                        <div class="mb-3" id="content_select_wrapper" style="display:none;">
+                            <label class="form-label">Select Content</label>
+                            <!-- Speaking content -->
+                            <select class="form-select module-content-select" data-module="speaking" name="content_id" style="display:none;">
+                                <option value="">Choose a biography…</option>
+                                {% for b in biographies %}
+                                <option value="{{ b.id }}" {{ task.content_id == b.id and 'selected' or '' }}>{{ b.name }} — {{ b.title }}</option>
+                                {% endfor %}
+                            </select>
+                            <!-- Listening content -->
+                            <select class="form-select module-content-select" data-module="listening" name="content_id" style="display:none;">
+                                <option value="">Choose listening content…</option>
+                                {% for item in listening_items %}
+                                <option value="{{ item.id }}" {{ task.content_id == item.id and 'selected' or '' }}>{{ item.title }}</option>
+                                {% endfor %}
+                            </select>
+                            <!-- Observation content -->
+                            <select class="form-select module-content-select" data-module="observation" name="content_id" style="display:none;">
+                                <option value="">Choose observation video…</option>
+                                {% for item in observation_items %}
+                                <option value="{{ item.id }}" {{ task.content_id == item.id and 'selected' or '' }}>{{ item.title }}</option>
+                                {% endfor %}
+                            </select>
+                            <!-- Writing topics -->
+                            <select class="form-select module-content-select" data-module="writing" name="content_id" style="display:none;">
+                                <option value="">Choose writing topic…</option>
+                                {% for item in writing_topics %}
+                                <option value="{{ item.id }}" {{ task.content_id == item.id and 'selected' or '' }}>{{ item.title }}</option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">If you link a practice, students will see a direct Practice button.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Department</label>
+                            <select class="form-select" name="department">
+                                <option value="ALL" {{ task.department == 'ALL' and 'selected' or '' }}>ALL (visible to everyone)</option>
+                                <option value="CSE" {{ task.department == 'CSE' and 'selected' or '' }}>CSE</option>
+                                <option value="ECE" {{ task.department == 'ECE' and 'selected' or '' }}>ECE</option>
+                                <option value="MECH" {{ task.department == 'MECH' and 'selected' or '' }}>MECH</option>
+                                <option value="CIVIL" {{ task.department == 'CIVIL' and 'selected' or '' }}>CIVIL</option>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Due Date</label>
+                            <input type="date" class="form-control" name="due_date" value="{{ task.due_date }}">
+                        </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="is_active" name="is_active" {{ task.is_active and 'checked' or '' }}>
+                            <label class="form-check-label" for="is_active">Active</label>
+                        </div>
+                        <button type="submit" class="btn btn-game-primary w-100">
+                            <i class="fas fa-save me-2"></i>Save Changes
+                        </button>
+                    </form>
+                </div>
+            </div>
+
+            <div class="col-lg-6">
+                <div class="game-card">
+                    <h5 class="mb-3">Task Metadata</h5>
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item">Task ID: <strong>{{ task.id }}</strong></li>
+                        <li class="list-group-item">Created By: <strong>{{ task.created_by }}</strong></li>
+                        <li class="list-group-item">Created At: <strong>{{ task.created_at }}</strong></li>
+                        <li class="list-group-item">Linked Module: <strong>{{ task.module_type or '-' }}</strong></li>
+                        <li class="list-group-item">Linked Content ID: <strong>{{ task.content_id or '-' }}</strong></li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        (function() {
+            const moduleSelect = document.getElementById('module_type_select');
+            const wrapper = document.getElementById('content_select_wrapper');
+            const contentSelects = document.querySelectorAll('.module-content-select');
+            function updateContentSelect() {
+                const value = moduleSelect.value;
+                let anyShown = false;
+                contentSelects.forEach(sel => {
+                    const show = (sel.getAttribute('data-module') === value);
+                    sel.style.display = show ? 'block' : 'none';
+                    if (show) anyShown = true;
+                });
+                wrapper.style.display = value ? 'block' : 'none';
+            }
+            moduleSelect && moduleSelect.addEventListener('change', updateContentSelect);
+            updateContentSelect();
+        })();
+    </script>
+</body>
+</html>

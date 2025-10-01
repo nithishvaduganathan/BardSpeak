@@ -8,7 +8,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/gamified.css') }}">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 </head>
-<body class="bg-gradient">
+<body class="bg-gradient admin-page">
     <div class="container-fluid py-4">
         <!-- Header -->
         <div class="row mb-4">
@@ -61,24 +61,39 @@
                     <h5><i class="fas fa-tools me-2"></i>Content Management</h5>
                     <div class="row">
                         <div class="col-md-3 mb-3">
-                            <button class="btn btn-speaking w-100" onclick="manageContent('biographies')">
-                                <i class="fas fa-microphone me-2"></i>Manage Biographies
-                            </button>
+                            <a class="btn btn-speaking w-100" href="{{ url_for('admin_add_speaking') }}">
+                                <i class="fas fa-microphone me-2"></i>Add Speaking Biography
+                            </a>
                         </div>
                         <div class="col-md-3 mb-3">
-                            <button class="btn btn-listening w-100" onclick="manageContent('listening')">
-                                <i class="fas fa-headphones me-2"></i>Manage Audio Content
-                            </button>
+                            <a class="btn btn-listening w-100" href="{{ url_for('admin_add_listening') }}">
+                                <i class="fas fa-headphones me-2"></i>Add Listening Audio
+                            </a>
                         </div>
                         <div class="col-md-3 mb-3">
-                            <button class="btn btn-writing w-100" onclick="manageContent('writing')">
-                                <i class="fas fa-pen-fancy me-2"></i>Manage Writing Topics
-                            </button>
+                            <a class="btn btn-writing w-100" href="{{ url_for('admin_add_writing') }}">
+                                <i class="fas fa-pen-fancy me-2"></i>Add Writing Topic
+                            </a>
                         </div>
                         <div class="col-md-3 mb-3">
-                            <button class="btn btn-observation w-100" onclick="manageContent('observation')">
-                                <i class="fas fa-eye me-2"></i>Manage Videos
-                            </button>
+                            <a class="btn btn-observation w-100" href="{{ url_for('admin_add_observation') }}">
+                                <i class="fas fa-eye me-2"></i>Add Observation Video
+                            </a>
+                        </div>
+                        <div class="col-md-3 mb-3">
+                            <a href="{{ url_for('admin_tasks') }}" class="btn btn-game-primary w-100">
+                                <i class="fas fa-tasks me-2"></i>Manage Tasks
+                            </a>
+                        </div>
+                        <div class="col-md-3 mb-3">
+                            <a class="btn btn-tts w-100" href="{{ url_for('admin_tts') }}">
+                                <i class="fas fa-file-audio me-2"></i>Text ➜ Audio Converter
+                            </a>
+                        </div>
+                        <div class="col-md-3 mb-3">
+                            <a class="btn btn-outline-light w-100" href="{{ url_for('admin_manage_practices') }}">
+                                <i class="fas fa-tools me-2"></i>Manage Practices
+                            </a>
                         </div>
                     </div>
                 </div>
@@ -152,136 +167,7 @@
         </div>
     </div>
 
-    <!-- Content Management Modal -->
-    <div class="modal fade" id="contentModal" tabindex="-1">
-        <div class="modal-dialog modal-lg">
-            <div class="modal-content" style="background: rgba(255, 255, 255, 0.95); border-radius: 15px;">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="modalTitle">Content Management</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body" id="modalBody">
-                    <!-- Content will be loaded here -->
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/gamified.js') }}"></script>
-    
-    <script>
-        function manageContent(type) {
-            const modal = new bootstrap.Modal(document.getElementById('contentModal'));
-            const modalTitle = document.getElementById('modalTitle');
-            const modalBody = document.getElementById('modalBody');
-            
-            let title, content;
-            
-            switch(type) {
-                case 'biographies':
-                    title = '🎤 Manage Speaking Biographies';
-                    content = `
-                        <div class="mb-3">
-                            <h6>Add New Biography</h6>
-                            <form>
-                                <div class="mb-2">
-                                    <input type="text" class="form-control" placeholder="Person Name" required>
-                                </div>
-                                <div class="mb-2">
-                                    <input type="text" class="form-control" placeholder="Title">
-                                </div>
-                                <div class="mb-2">
-                                    <select class="form-control">
-                                        <option>Cricketer</option>
-                                        <option>Scientist</option>
-                                        <option>Actor</option>
-                                        <option>Leader</option>
-                                    </select>
-                                </div>
-                                <div class="mb-2">
-                                    <textarea class="form-control" rows="4" placeholder="Biography content..."></textarea>
-                                </div>
-                                <button type="button" class="btn btn-speaking" onclick="showFlashMessage('Biography added successfully!', 'success')">Add Biography</button>
-                            </form>
-                        </div>
-                    `;
-                    break;
-                    
-                case 'listening':
-                    title = '🎧 Manage Listening Content';
-                    content = `
-                        <div class="mb-3">
-                            <h6>Add New Audio Content</h6>
-                            <form>
-                                <div class="mb-2">
-                                    <input type="text" class="form-control" placeholder="Audio Title" required>
-                                </div>
-                                <div class="mb-2">
-                                    <input type="file" class="form-control" accept="audio/*">
-                                </div>
-                                <div class="mb-2">
-                                    <textarea class="form-control" rows="3" placeholder="Audio transcript..."></textarea>
-                                </div>
-                                <div class="mb-2">
-                                    <select class="form-control">
-                                        <option>Boy Robot</option>
-                                        <option>Girl Robot</option>
-                                    </select>
-                                </div>
-                                <button type="button" class="btn btn-listening" onclick="showFlashMessage('Audio content added successfully!', 'success')">Add Audio</button>
-                            </form>
-                        </div>
-                    `;
-                    break;
-                    
-                case 'writing':
-                    title = '✍️ Manage Writing Topics';
-                    content = `
-                        <div class="mb-3">
-                            <h6>Add New Writing Topic</h6>
-                            <form>
-                                <div class="mb-2">
-                                    <input type="text" class="form-control" placeholder="Topic Title" required>
-                                </div>
-                                <div class="mb-2">
-                                    <textarea class="form-control" rows="3" placeholder="Topic description and instructions..."></textarea>
-                                </div>
-                                <button type="button" class="btn btn-writing" onclick="showFlashMessage('Writing topic added successfully!', 'success')">Add Topic</button>
-                            </form>
-                        </div>
-                    `;
-                    break;
-                    
-                case 'observation':
-                    title = '👁️ Manage Observation Videos';
-                    content = `
-                        <div class="mb-3">
-                            <h6>Add New Video Content</h6>
-                            <form>
-                                <div class="mb-2">
-                                    <input type="text" class="form-control" placeholder="Video Title" required>
-                                </div>
-                                <div class="mb-2">
-                                    <input type="url" class="form-control" placeholder="Video URL (YouTube, etc.)">
-                                </div>
-                                <div class="mb-2">
-                                    <textarea class="form-control" rows="2" placeholder="Comprehension questions..."></textarea>
-                                </div>
-                                <div class="mb-2">
-                                    <textarea class="form-control" rows="2" placeholder="Correct answers..."></textarea>
-                                </div>
-                                <button type="button" class="btn btn-observation" onclick="showFlashMessage('Video content added successfully!', 'success')">Add Video</button>
-                            </form>
-                        </div>
-                    `;
-                    break;
-            }
-            
-            modalTitle.innerHTML = title;
-            modalBody.innerHTML = content;
-            modal.show();
-        }
-    </script>
 </body>
 </html>

@@ -2,7 +2,11 @@
 
 document.addEventListener('DOMContentLoaded', function() {
     // Initialize gamified features
-    initializeCopyPrevention();
+    // Skip copy-prevention on admin pages
+    const isAdminPage = document.body && document.body.classList && document.body.classList.contains('admin-page');
+    if (!isAdminPage) {
+        initializeCopyPrevention();
+    }
     initializeAlertAutoDismiss();
     initializeModuleAnimations();
     initializeCelebrations();

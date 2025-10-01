@@ -32,6 +32,57 @@
             </div>
         </div>
 
+        <!-- Assigned Tasks -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="game-card">
+                    <h5><i class="fas fa-tasks me-2"></i>Assigned Tasks</h5>
+                    {% if tasks and tasks|length > 0 %}
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Title</th>
+                                        <th>Description</th>
+                                        <th>Department</th>
+                                        <th>Due</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for t in tasks %}
+                                    <tr>
+                                        <td><strong>{{ t.title }}</strong></td>
+                                        <td>{{ t.description or '-' }}</td>
+                                        <td>{{ t.department }}</td>
+                                        <td>{{ t.due_date or '-' }}</td>
+                                        <td>
+                                            {% if t.module_type and t.content_id %}
+                                                {% if t.module_type == 'speaking' %}
+                                                    <a href="{{ url_for('speaking_practice', bio_id=t.content_id) }}" class="btn btn-speaking btn-sm">Practice Now</a>
+                                                {% elif t.module_type == 'listening' %}
+                                                    <a href="{{ url_for('listening_practice', content_id=t.content_id) }}" class="btn btn-listening btn-sm">Practice Now</a>
+                                                {% elif t.module_type == 'observation' %}
+                                                    <a href="{{ url_for('observation_practice', content_id=t.content_id) }}" class="btn btn-observation btn-sm">Practice Now</a>
+                                                {% elif t.module_type == 'writing' %}
+                                                    <a href="{{ url_for('writing_module') }}" class="btn btn-writing btn-sm">Practice Now</a>
+                                                {% endif %}
+                                            {% else %}
+                                                <span class="text-muted">-</span>
+                                            {% endif %}
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                    {% else %}
+                        <p class="text-muted mb-0">No tasks assigned yet. Check back later.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
         {% with messages = get_flashed_messages() %}
             {% if messages %}
                 {% for message in messages %}
@@ -163,17 +214,38 @@
             <div class="col-12">
                 <div class="game-card text-center">
                     <div class="row">
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
+                            <a href="{{ url_for('profile') }}" class="btn btn-game-secondary w-100">
+                                <i class="fas fa-user-edit me-2"></i>Profile
+                            </a>
+                        </div>
+                        <div class="col-md-3 mb-2">
+                            {% if certificate_ready %}
+                                <a href="{{ url_for('certificate_view') }}" class="btn btn-success w-100">
+                                    <i class="fas fa-certificate me-2"></i>Certificate
+                                </a>
+                            {% else %}
+                                <a href="{{ url_for('certificate_view') }}" class="btn btn-outline-secondary w-100">
+                                    <i class="fas fa-certificate me-2"></i>Certificate
+                                </a>
+                            {% endif %}
+                        </div>
+                        <div class="col-md-3 mb-2">
                             <a href="{{ url_for('leaderboard') }}" class="btn btn-game-secondary w-100">
                                 <i class="fas fa-ranking-star me-2"></i>Leaderboard
                             </a>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2">
                             <a href="{{ url_for('dashboard') }}" class="btn btn-game-primary w-100">
                                 <i class="fas fa-refresh me-2"></i>Refresh
                             </a>
                         </div>
-                        <div class="col-md-4 mb-2">
+                        <div class="col-md-3 mb-2 d-none">
+                            <a href="#" class="btn btn-outline-light w-100">
+                                <i class="fas fa-sign-out-alt me-2"></i>Logout
+                            </a>
+                        </div>
+                        <div class="col-md-3 mb-2">
                             <a href="{{ url_for('logout') }}" class="btn btn-outline-light w-100">
                                 <i class="fas fa-sign-out-alt me-2"></i>Logout
                             </a>

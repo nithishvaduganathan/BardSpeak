@@ -36,17 +36,15 @@
                     <h5><i class="fas fa-video me-2"></i>Motivational Video</h5>
                     
                     <div class="video-container text-center mb-4">
-                        <div class="video-placeholder" style="background: linear-gradient(135deg, #f39c12 0%, #e67e22 100%); 
-                                                            padding: 60px 20px; 
-                                                            border-radius: 15px; 
-                                                            color: white;">
-                            <i class="fas fa-play-circle fa-5x mb-3"></i>
-                            <h4>{{ content.title }}</h4>
-                            <p>📺 Video Link: {{ content.video_url }}</p>
-                            <button class="btn btn-light btn-lg" onclick="watchVideo()">
-                                <i class="fas fa-play me-2"></i>Watch Video
-                            </button>
+                        <div class="ratio ratio-16x9">
+                            <iframe id="ytFrame"
+                                    src=""
+                                    title="{{ content.title }}"
+                                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                    allowfullscreen
+                                    referrerpolicy="strict-origin-when-cross-origin"></iframe>
                         </div>
+                        <small class="text-muted d-block mt-2">Source: {{ content.video_url }}</small>
                     </div>
                     
                     <div class="alert alert-info">
@@ -79,14 +77,13 @@
                                       id="user_answer" 
                                       name="user_answer" 
                                       rows="6" 
-                                      placeholder="Watch the video first, then provide your detailed answer here..."
-                                      required
-                                      disabled></textarea>
-                            <small class="text-muted">💡 Watch the video completely before answering</small>
+                                      placeholder="Provide your detailed answer here..."
+                                      required></textarea>
+                            <small class="text-muted">💡 Watch the video and reflect before answering</small>
                         </div>
                         
                         <div class="text-center">
-                            <button type="submit" class="btn btn-game-primary btn-lg" id="submitBtn" disabled>
+                            <button type="submit" class="btn btn-game-primary btn-lg" id="submitBtn">
                                 <i class="fas fa-check me-2"></i>Submit Answer
                             </button>
                         </div>
@@ -109,70 +106,64 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/gamified.js') }}"></script>
-    
     <script>
-        let videoWatched = false;
-        
-        function watchVideo() {
-            // Simulate video watching experience
-            showFlashMessage('🎬 Starting video... Watch carefully!', 'info');
-            
-            // Simulate video duration (15 seconds for demo)
-            setTimeout(() => {
-                videoWatched = true;
-                document.getElementById('videoWatchedIndicator').style.display = 'block';
-                document.getElementById('user_answer').disabled = false;
-                document.getElementById('submitBtn').disabled = false;
-                document.getElementById('user_answer').focus();
-                
-                showFlashMessage('✅ Video completed! Now answer the questions to earn points.', 'success');
-            }, 15000);
+        // Build YouTube embed URL from various URL formats
+        function toYouTubeEmbed(url) {
+            try {
+                const u = new URL(url);
+                if (u.hostname.includes('youtube.com')) {
+                    if (u.pathname === '/watch') {
+                        const v = u.searchParams.get('v');
+                        if (v) return `https://www.youtube.com/embed/${v}`;
+                    }
+                    if (u.pathname.startsWith('/embed/')) {
+                        return url; // already embed
+                    }
+                    if (u.pathname.startsWith('/shorts/')) {
+                        const id = u.pathname.split('/')[2];
+                        if (id) return `https://www.youtube.com/embed/${id}`;
+                    }
+                }
+                if (u.hostname === 'youtu.be') {
+                    const id = u.pathname.replace('/', '');
+                    if (id) return `https://www.youtube.com/embed/${id}`;
+                }
+            } catch (e) {}
+            return url; // fallback
         }
 
-        // Handle form submission
+        (function initVideo() {
+            const src = toYouTubeEmbed(`{{ content.video_url }}`);
+            const frame = document.getElementById('ytFrame');
+            if (frame) frame.src = src;
+        })();
+
+        // Handle form submission via fetch to preserve existing UX
         document.getElementById('observationForm').addEventListener('submit', function(e) {
             e.preventDefault();
-            
-            if (!videoWatched) {
-                showFlashMessage('Please watch the video first!', 'warning');
-                return;
-            }
-            
             const submitBtn = document.getElementById('submitBtn');
             const originalText = submitBtn.innerHTML;
-            
             submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Analyzing Answer...';
             submitBtn.disabled = true;
-            
             const formData = new FormData(this);
-            
-            fetch('{{ url_for("submit_observation") }}', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
-                
-                if (data.celebration) {
-                    // Perfect answer celebration
-                    triggerCelebration(data.points);
-                    showFlashMessage(`🎉 Excellent observation! Perfect answer! Points earned: ${data.points}`, 'success');
-                } else {
-                    // Good attempt
-                    showFlashMessage(`Good observation! Accuracy: ${data.accuracy}% | Points earned: ${data.points}`, 'info');
-                }
-                
-                setTimeout(() => {
-                    window.location.href = '{{ url_for("observation_module") }}';
-                }, 3000);
-            })
-            .catch(error => {
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
-                showFlashMessage('Error submitting answer. Please try again.', 'error');
-            });
+            fetch('{{ url_for("submit_observation") }}', { method: 'POST', body: formData })
+                .then(r => r.json())
+                .then(data => {
+                    submitBtn.innerHTML = originalText;
+                    submitBtn.disabled = false;
+                    if (data.celebration) {
+                        triggerCelebration(data.points);
+                        showFlashMessage(`🎉 Excellent observation! Perfect answer! Points earned: ${data.points}`, 'success');
+                    } else {
+                        showFlashMessage(`Good observation! Accuracy: ${data.accuracy}% | Points earned: ${data.points}`, 'info');
+                    }
+                    setTimeout(() => { window.location.href = '{{ url_for("observation_module") }}'; }, 3000);
+                })
+                .catch(() => {
+                    submitBtn.innerHTML = originalText;
+                    submitBtn.disabled = false;
+                    showFlashMessage('Error submitting answer. Please try again.', 'error');
+                });
         });
     </script>
 </body>

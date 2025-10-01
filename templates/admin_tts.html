@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Text to Audio Converter - Shakespeare Club</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/gamified.css') }}">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-gradient admin-page">
+  <div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <h2 class="mb-0"><i class="fas fa-file-audio me-2"></i>Text ➜ Audio Converter</h2>
+      <div>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-light"><i class="fas fa-home me-2"></i>Admin Home</a>
+      </div>
+    </div>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        {% for message in messages %}
+          <div class="alert alert-info alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    <div class="row g-3">
+      <div class="col-lg-7">
+        <div class="game-card">
+          <h5 class="mb-3">Generate Audio from Text</h5>
+          <form method="post">
+            <div class="mb-3">
+              <label class="form-label">Text</label>
+              <textarea class="form-control" name="text" rows="8" placeholder="Enter the text you want to convert to audio..." required></textarea>
+            </div>
+            <div class="row">
+              <div class="col-md-4 mb-3">
+                <label class="form-label">Language</label>
+                <select class="form-select" name="lang">
+                  <option value="en" selected>English (en)</option>
+                  <option value="hi">Hindi (hi)</option>
+                  <option value="ta">Tamil (ta)</option>
+                  <option value="te">Telugu (te)</option>
+                  <option value="ml">Malayalam (ml)</option>
+                </select>
+              </div>
+              <div class="col-md-4 mb-3">
+                <label class="form-label">Speed</label>
+                <div class="form-check">
+                  <input class="form-check-input" type="checkbox" name="slow" id="slow">
+                  <label class="form-check-label" for="slow">Slow voice</label>
+                </div>
+              </div>
+            </div>
+
+            <hr/>
+            <h6 class="mb-2">Option: Save as Listening Content</h6>
+            <div class="mb-3">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" name="make_listening" id="make_listening">
+                <label class="form-check-label" for="make_listening">Create a Listening practice item with this audio</label>
+              </div>
+            </div>
+            <div class="row">
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Title (for Listening)</label>
+                <input class="form-control" type="text" name="title" placeholder="e.g., TTS: Daily Motivation" />
+              </div>
+              <div class="col-md-6 mb-3">
+                <label class="form-label">Robot Character</label>
+                <select class="form-select" name="robot_character">
+                  <option value="boy" selected>Boy</option>
+                  <option value="girl">Girl</option>
+                </select>
+              </div>
+            </div>
+
+            <button type="submit" class="btn btn-game-primary w-100"><i class="fas fa-magic me-2"></i>Generate Audio</button>
+          </form>
+        </div>
+      </div>
+
+      <div class="col-lg-5">
+        <div class="game-card">
+          <h5 class="mb-3">Output</h5>
+          {% if output_filename %}
+            <div class="alert alert-success">
+              <i class="fas fa-check-circle me-2"></i>Audio generated: <strong>{{ output_filename }}</strong>
+            </div>
+            <audio controls src="{{ url_for('static', filename='audio/' + output_filename) }}" class="w-100"></audio>
+            {% if created_listening_id %}
+              <div class="mt-3">
+                <a href="{{ url_for('listening_practice', content_id=created_listening_id) }}" class="btn btn-listening w-100">
+                  <i class="fas fa-headphones me-2"></i>Open Listening Practice
+                </a>
+              </div>
+            {% endif %}
+          {% else %}
+            <p class="text-muted mb-0">Generate audio to preview and download here.</p>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="{{ url_for('static', filename='js/gamified.js') }}"></script>
+</body>
+</html>

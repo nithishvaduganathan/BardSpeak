@@ -2,6 +2,8 @@
 
 {% block title %}Manage Practices - Shakespeare Club{% endblock %}
 
+{% block body_class %}admin-page{% endblock %}
+
 {% block content %}
 <div class="row">
     <div class="col-md-12">
@@ -50,8 +52,6 @@
             </div>
         {% else %}
             <div class="alert alert-info">
-                <h5>No practices available</h5>
-                <p>Start by adding your first practice module.</p>
                 <a href="{{ url_for('add_practice') }}" class="btn btn-primary">Add Practice</a>
             </div>
         {% endif %}

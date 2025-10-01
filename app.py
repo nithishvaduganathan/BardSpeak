@@ -1,14 +1,37 @@
 import os
 import sqlite3
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify
+from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, date
 import json
 from gemini import analyze_sentiment, analyze_communication_practice
 import random
+import io
+from pydub import AudioSegment
+import speech_recognition as sr
+# Optional PDF generation for certificates
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    REPORTLAB_AVAILABLE = True
+except Exception:
+    REPORTLAB_AVAILABLE = False
+try:
+    from gtts import gTTS
+except Exception:
+    gTTS = None
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SESSION_SECRET', 'shakespeare-club-secret-key')
+
+# Optional: Configure FFmpeg/FFprobe for pydub on Windows via env vars
+FFMPEG_BIN = os.environ.get('FFMPEG_BIN')
+FFPROBE_BIN = os.environ.get('FFPROBE_BIN')
+if FFMPEG_BIN:
+    AudioSegment.converter = FFMPEG_BIN
+if FFPROBE_BIN:
+    AudioSegment.ffprobe = FFPROBE_BIN
 
 # Database initialization for gamified app
 def init_db():
@@ -91,6 +114,34 @@ def init_db():
         FOREIGN KEY (created_by) REFERENCES admins (id)
     )''')
     
+    # Tasks table for admin-assigned tasks visible on student dashboard
+    c.execute('''CREATE TABLE IF NOT EXISTS tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        department TEXT DEFAULT 'ALL',
+        due_date DATE,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_by INTEGER,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        module_type TEXT,
+        content_id INTEGER,
+        FOREIGN KEY (created_by) REFERENCES admins (id)
+    )''')
+
+    # Ensure new columns exist on older databases
+    existing_cols = [r[1] for r in c.execute('PRAGMA table_info(tasks)').fetchall()]
+    if 'module_type' not in existing_cols:
+        try:
+            c.execute('ALTER TABLE tasks ADD COLUMN module_type TEXT')
+        except Exception:
+            pass
+    if 'content_id' not in existing_cols:
+        try:
+            c.execute('ALTER TABLE tasks ADD COLUMN content_id INTEGER')
+        except Exception:
+            pass
+    
     # User activities and completions
     c.execute('''CREATE TABLE IF NOT EXISTS user_completions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +161,16 @@ def init_db():
         modules_completed INTEGER DEFAULT 0,
         points_earned INTEGER DEFAULT 0,
         FOREIGN KEY (user_id) REFERENCES users (id)
+    )''')
+    
+    # Track speaking attempts to enforce limit
+    c.execute('''CREATE TABLE IF NOT EXISTS speaking_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        bio_id INTEGER NOT NULL,
+        attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id),
+        FOREIGN KEY (bio_id) REFERENCES biographies (id)
     )''')
     
     # Insert default admin
@@ -208,6 +269,20 @@ def calculate_badge_progress(user_id):
     
     return badges
 
+def is_certificate_ready(user_id):
+    """Eligibility: at least one completion in each module: speaking, listening, writing, observation"""
+    conn = get_db_connection()
+    rows = conn.execute('''
+        SELECT module_type, COUNT(*) as c
+        FROM user_completions
+        WHERE user_id = ? AND module_type IN ('speaking','listening','writing','observation')
+        GROUP BY module_type
+    ''', (user_id,)).fetchall()
+    conn.close()
+    have = {r['module_type'] for r in rows if r['c'] > 0}
+    required = {'speaking','listening','writing','observation'}
+    return required.issubset(have)
+
 @app.route('/')
 def index():
     return render_template('home.html')
@@ -293,13 +368,28 @@ def dashboard():
     # Calculate badges
     badges = calculate_badge_progress(session['user_id'])
     
+    # Get active tasks for user's department or ALL
+    tasks = conn.execute('''
+        SELECT * FROM tasks 
+        WHERE is_active = TRUE 
+          AND (department = 'ALL' OR department = ?) 
+        ORDER BY 
+          CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
+          due_date ASC,
+          created_at DESC
+        LIMIT 10
+    ''', (session['department'],)).fetchall()
+
     conn.close()
     
+    certificate_ready = is_certificate_ready(session['user_id'])
     return render_template('dashboard.html', 
                          user=user, 
                          activities=recent_activities, 
                          featured_quote=featured_quote,
-                         badges=badges)
+                         badges=badges,
+                         tasks=tasks,
+                         certificate_ready=certificate_ready)
 
 @app.route('/speaking')
 def speaking_module():
@@ -414,16 +504,17 @@ def submit_speaking():
     conn.commit()
     conn.close()
     
-    # Update user streak and points
+    # Update user streak and points (use a fresh connection)
+    conn2 = get_db_connection()
     today = date.today()
-    streak_record = conn.execute('''
+    streak_record = conn2.execute('''
         SELECT * FROM user_streaks 
         WHERE user_id = ? AND streak_date = ?
     ''', (session['user_id'], today)).fetchone()
     
     if not streak_record:
         # First task today
-        conn.execute('''INSERT INTO user_streaks 
+        conn2.execute('''INSERT INTO user_streaks 
                        (user_id, streak_date, modules_completed, points_earned)
                        VALUES (?, ?, 1, ?)''',
                     (session['user_id'], today, points_earned))
@@ -431,29 +522,29 @@ def submit_speaking():
         # Update current streak
         yesterday = date.today().replace(day=date.today().day-1) if date.today().day > 1 else None
         if yesterday:
-            yesterday_record = conn.execute('''
+            yesterday_record = conn2.execute('''
                 SELECT * FROM user_streaks 
                 WHERE user_id = ? AND streak_date = ?
             ''', (session['user_id'], yesterday)).fetchone()
             
             if yesterday_record:
-                conn.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
+                conn2.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
                            (session['user_id'],))
             else:
-                conn.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
+                conn2.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
                            (session['user_id'],))
         else:
-            conn.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
+            conn2.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
                        (session['user_id'],))
     
     # Update best streak
-    current_user = conn.execute('SELECT current_streak FROM users WHERE id = ?', 
+    current_user = conn2.execute('SELECT current_streak FROM users WHERE id = ?', 
                                (session['user_id'],)).fetchone()
-    conn.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
+    conn2.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
                    WHERE id = ?''', (session['user_id'],))
     
-    conn.commit()
-    conn.close()
+    conn2.commit()
+    conn2.close()
     
     success_data = {
         'points': points_earned,
@@ -463,6 +554,145 @@ def submit_speaking():
     }
     
     return jsonify(success_data)
+
+@app.route('/submit_speaking_audio', methods=['POST'])
+def submit_speaking_audio():
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+    
+    bio_id = request.form.get('bio_id')
+    audio_file = request.files.get('audio')
+    if not bio_id or not audio_file:
+        return jsonify({'error': 'Missing audio or bio_id'}), 400
+    
+    # Enforce attempts: max 3 per user per bio per day
+    conn_attempts = get_db_connection()
+    today = date.today()
+    attempt_count = conn_attempts.execute('''
+        SELECT COUNT(*) AS c FROM speaking_attempts
+        WHERE user_id = ? AND bio_id = ? AND DATE(attempt_at) = DATE(?)
+    ''', (session['user_id'], bio_id, today)).fetchone()['c']
+    if attempt_count >= 10:
+        conn_attempts.close()
+        return jsonify({'error': 'Attempt limit reached. You have already tried 3 times today.'}), 429
+    # Record this attempt regardless of success
+    conn_attempts.execute('''INSERT INTO speaking_attempts (user_id, bio_id) VALUES (?, ?)''',
+                          (session['user_id'], bio_id))
+    conn_attempts.commit()
+    conn_attempts.close()
+
+    # Prefer: accept WAV directly. Fallback: convert using pydub if not WAV.
+    raw = audio_file.read()
+    wav_buf = None
+    try:
+        filename = (audio_file.filename or '').lower()
+        content_type = (audio_file.mimetype or '').lower()
+        src_buf = io.BytesIO(raw)
+        src_buf.seek(0)
+        # If client uploaded WAV (our new default), try using it directly
+        if filename.endswith('.wav') or 'wav' in content_type:
+            wav_buf = src_buf
+        else:
+            # Try to treat it as WAV directly (some browsers may already produce PCM WAV)
+            try:
+                with sr.AudioFile(src_buf) as _:
+                    pass
+                wav_buf = src_buf
+            except Exception:
+                wav_buf = None
+        # If still not WAV, convert using pydub (requires ffmpeg)
+        if wav_buf is None:
+            segment = AudioSegment.from_file(io.BytesIO(raw))
+            out = io.BytesIO()
+            segment.set_frame_rate(16000).set_channels(1).export(out, format='wav')
+            out.seek(0)
+            wav_buf = out
+    except Exception as e:
+        hint = (' Ensure FFmpeg is installed and available in PATH, or set env vars '
+                'FFMPEG_BIN (path to ffmpeg.exe) and FFPROBE_BIN (path to ffprobe.exe). '
+                'Download: https://www.gyan.dev/ffmpeg/builds/')
+        return jsonify({'error': f'Audio processing failed: {str(e)}.{hint}'}), 400
+    
+    # Transcribe using SpeechRecognition (Google API)
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(wav_buf) as source:
+            audio_data = recognizer.record(source)
+        recorded_text = recognizer.recognize_google(audio_data)
+    except Exception as e:
+        return jsonify({'error': f'Speech-to-text failed: {str(e)}'}), 400
+    
+    # Now reuse the scoring logic from submit_speaking
+    conn = get_db_connection()
+    # Check duplicate completion
+    existing = conn.execute('''
+        SELECT * FROM user_completions 
+        WHERE user_id = ? AND module_type = "speaking" AND content_id = ?
+    ''', (session['user_id'], bio_id)).fetchone()
+    if existing:
+        conn.close()
+        return jsonify({'error': 'Already completed'}), 409
+    
+    biography = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
+    if not biography:
+        conn.close()
+        return jsonify({'error': 'Biography not found'}), 404
+    
+    try:
+        sentiment_result = analyze_sentiment(recorded_text)
+        detailed_feedback = analyze_communication_practice(recorded_text, 'speaking')
+        original_words = set(biography['content'].lower().split())
+        user_words = set(recorded_text.lower().split())
+        similarity = len(original_words.intersection(user_words)) / max(len(original_words), 1) * 100
+        points_earned = 10
+        if similarity >= 80 and sentiment_result.rating >= 4:
+            points_earned = 15
+        elif similarity >= 60 or sentiment_result.rating >= 3:
+            points_earned = 12
+        final_score = min(100, similarity + sentiment_result.rating * 10)
+    except Exception:
+        original_words = biography['content'].lower().split()
+        user_words = recorded_text.lower().split()
+        matching_words = sum(1 for word in user_words if word in original_words)
+        similarity = (matching_words / len(original_words)) * 100 if original_words else 0
+        points_earned = 10 if similarity >= 70 else 8
+        final_score = similarity
+    
+    # Save completion and points
+    conn.execute('''INSERT INTO user_completions 
+                   (user_id, module_type, content_id, score, points_earned)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (session['user_id'], 'speaking', bio_id, final_score, points_earned))
+    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
+                (points_earned, session['user_id']))
+    conn.commit()
+    conn.close()
+    
+    # Update streaks using fresh connection
+    conn2 = get_db_connection()
+    today = date.today()
+    streak_record = conn2.execute('''
+        SELECT * FROM user_streaks 
+        WHERE user_id = ? AND streak_date = ?
+    ''', (session['user_id'], today)).fetchone()
+    if not streak_record:
+        conn2.execute('''INSERT INTO user_streaks 
+                       (user_id, streak_date, modules_completed, points_earned)
+                       VALUES (?, ?, 1, ?)''',
+                    (session['user_id'], today, points_earned))
+        conn2.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
+                     (session['user_id'],))
+    conn2.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
+                   WHERE id = ?''', (session['user_id'],))
+    conn2.commit()
+    conn2.close()
+    
+    return jsonify({
+        'points': points_earned,
+        'similarity': similarity,
+        'celebration': similarity >= 70,
+        'transcript': recorded_text
+    })
 
 @app.route('/writing')
 def writing_module():
@@ -685,7 +915,7 @@ def submit_listening():
     if existing:
         conn.close()
         flash('🚫 You have already completed this listening practice! Try a different one.')
-        return redirect(url_for('listening'))
+        return redirect(url_for('listening_module'))
     
     content = conn.execute('SELECT * FROM listening_content WHERE id = ?', (content_id,)).fetchone()
     
@@ -826,7 +1056,7 @@ def submit_observation():
     if existing:
         conn.close()
         flash('🚫 You have already completed this observation practice! Try a different video.')
-        return redirect(url_for('observation'))
+        return redirect(url_for('observation_module'))
     
     content = conn.execute('SELECT * FROM observation_content WHERE id = ?', (content_id,)).fetchone()
     
@@ -942,6 +1172,363 @@ def admin_dashboard():
     
     return render_template('admin_dashboard.html', stats=stats, activities=recent_activities)
 
+# ---------- Admin: Add Content Routes ----------
+from werkzeug.utils import secure_filename
+
+UPLOAD_DIR = os.path.join('static', 'audio')
+ALLOWED_AUDIO_EXTS = {'.mp3', '.wav', '.ogg', '.m4a', '.webm'}
+
+def ensure_upload_dir():
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+@app.route('/admin/speaking/new', methods=['GET', 'POST'])
+def admin_add_speaking():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    if request.method == 'POST':
+        person_name = request.form.get('person_name', '').strip()
+        title = request.form.get('title', '').strip()
+        profession = request.form.get('profession', '').strip() or 'Leader'
+        content = request.form.get('content', '').strip()
+        if not person_name or not content:
+            flash('Person name and script are required')
+        else:
+            conn = get_db_connection()
+            conn.execute('''INSERT INTO biographies (title, person_name, content, profession, created_by)
+                            VALUES (?, ?, ?, ?, ?)''',
+                         (title or f"About {person_name}", person_name, content, profession, session['admin_id']))
+            conn.commit()
+            conn.close()
+            flash('Speaking topic added')
+            return redirect(url_for('admin_add_speaking'))
+    return render_template('admin_add_speaking.html')
+
+@app.route('/admin/listening/new', methods=['GET', 'POST'])
+def admin_add_listening():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        transcript = request.form.get('transcript', '').strip()
+        robot_character = request.form.get('robot_character', 'boy')
+        audio = request.files.get('audio_file')
+        if not title or not transcript or not audio:
+            flash('Title, audio file, and script are required')
+        else:
+            ensure_upload_dir()
+            name = secure_filename(audio.filename)
+            ext = os.path.splitext(name)[1].lower()
+            if ext not in ALLOWED_AUDIO_EXTS:
+                flash('Unsupported audio type. Allowed: mp3, wav, ogg, m4a, webm')
+            else:
+                filename = f"{int(datetime.now().timestamp())}_{name}"
+                path = os.path.join(UPLOAD_DIR, filename)
+                audio.save(path)
+                conn = get_db_connection()
+                conn.execute('''INSERT INTO listening_content (title, audio_file, transcript, robot_character, created_by)
+                                VALUES (?, ?, ?, ?, ?)''',
+                             (title, filename, transcript, robot_character, session['admin_id']))
+                conn.commit()
+                conn.close()
+                flash('Listening content added')
+                return redirect(url_for('admin_add_listening'))
+    return render_template('admin_add_listening.html')
+
+@app.route('/admin/observation/new', methods=['GET', 'POST'])
+def admin_add_observation():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        video_url = request.form.get('video_url', '').strip()
+        questions = request.form.get('questions', '').strip()
+        correct_answers = request.form.get('correct_answers', '').strip()
+        if not title or not video_url or not questions or not correct_answers:
+            flash('All fields are required')
+        else:
+            conn = get_db_connection()
+            conn.execute('''INSERT INTO observation_content (title, video_url, questions, correct_answers, created_by)
+                            VALUES (?, ?, ?, ?, ?)''',
+                         (title, video_url, questions, correct_answers, session['admin_id']))
+            conn.commit()
+            conn.close()
+            flash('Observation content added')
+            return redirect(url_for('admin_add_observation'))
+    return render_template('admin_add_observation.html')
+
+@app.route('/admin/writing/new', methods=['GET', 'POST'])
+def admin_add_writing():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    if request.method == 'POST':
+        topic = request.form.get('topic', '').strip()
+        description = request.form.get('description', '').strip()
+        if not topic:
+            flash('Topic is required')
+        else:
+            conn = get_db_connection()
+            conn.execute('''INSERT INTO writing_topics (topic, description, created_by)
+                            VALUES (?, ?, ?)''',
+                         (topic, description, session['admin_id']))
+            conn.commit()
+            conn.close()
+            flash('Writing topic added')
+            return redirect(url_for('admin_add_writing'))
+    return render_template('admin_add_writing.html')
+
+@app.route('/admin/tts', methods=['GET', 'POST'])
+def admin_tts():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    error = None
+    output_filename = None
+    created_listening_id = None
+    if request.method == 'POST':
+        if gTTS is None:
+            flash('gTTS is not installed. Please install it with: pip install gTTS', 'error')
+            return redirect(url_for('admin_tts'))
+        text = (request.form.get('text') or '').strip()
+        lang = (request.form.get('lang') or 'en').strip()
+        slow = True if request.form.get('slow') == 'on' else False
+        make_listening = True if request.form.get('make_listening') == 'on' else False
+        title = (request.form.get('title') or '').strip()
+        robot_character = request.form.get('robot_character') or 'boy'
+        if not text:
+            flash('Please enter text to convert to audio.', 'error')
+            return redirect(url_for('admin_tts'))
+        try:
+            ensure_upload_dir()
+            ts = int(datetime.now().timestamp())
+            output_filename = f"tts_{ts}.mp3"
+            output_path = os.path.join(UPLOAD_DIR, output_filename)
+            tts = gTTS(text=text, lang=lang, slow=slow)
+            tts.save(output_path)
+            flash(f'Audio generated successfully: {output_filename}', 'success')
+            if make_listening and title:
+                conn = get_db_connection()
+                conn.execute('''INSERT INTO listening_content (title, audio_file, transcript, robot_character, created_by)
+                                VALUES (?, ?, ?, ?, ?)''',
+                             (title, output_filename, text, robot_character, session['admin_id']))
+                conn.commit()
+                created_listening_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
+                conn.close()
+                flash('Listening content created from generated audio.', 'success')
+        except Exception as e:
+            error = str(e)
+            flash(f'Failed to generate audio: {error}', 'error')
+    return render_template('admin_tts.html', output_filename=output_filename, created_listening_id=created_listening_id)
+
+@app.route('/admin/tasks', methods=['GET', 'POST'])
+def admin_tasks():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    
+    conn = get_db_connection()
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        description = request.form.get('description', '').strip()
+        department = request.form.get('department', 'ALL').strip() or 'ALL'
+        due_date = request.form.get('due_date') or None
+        is_active = 1 if request.form.get('is_active') == 'on' else 1  # default active
+        module_type = request.form.get('module_type') or None
+        content_id = request.form.get('content_id') or None
+        if content_id:
+            try:
+                content_id = int(content_id)
+            except ValueError:
+                content_id = None
+        
+        if not title:
+            flash('Task title is required')
+        else:
+            conn.execute('''INSERT INTO tasks (title, description, department, due_date, is_active, created_by, module_type, content_id)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                         (title, description, department, due_date, is_active, session['admin_id'], module_type, content_id))
+            conn.commit()
+            flash('Task added successfully')
+            
+    # List recent tasks
+    tasks = conn.execute('''SELECT t.*, a.username AS admin_name FROM tasks t
+                            LEFT JOIN admins a ON t.created_by = a.id
+                            ORDER BY t.created_at DESC
+                            LIMIT 50''').fetchall()
+
+    # Load content lists for linking
+    biographies = conn.execute('SELECT id, person_name AS name, title FROM biographies ORDER BY created_at DESC').fetchall()
+    listening_items = conn.execute('SELECT id, title FROM listening_content ORDER BY created_at DESC').fetchall()
+    observation_items = conn.execute('SELECT id, title FROM observation_content ORDER BY created_at DESC').fetchall()
+    writing_topics = conn.execute('SELECT id, topic AS title FROM writing_topics ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return render_template('admin_tasks.html', tasks=tasks,
+                           biographies=biographies,
+                           listening_items=listening_items,
+                           observation_items=observation_items,
+                           writing_topics=writing_topics)
+
+@app.route('/admin/tasks/<int:task_id>/edit', methods=['GET', 'POST'])
+def admin_edit_task(task_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        flash('Task not found')
+        return redirect(url_for('admin_tasks'))
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        description = request.form.get('description', '').strip()
+        department = request.form.get('department', 'ALL').strip() or 'ALL'
+        due_date = request.form.get('due_date') or None
+        is_active = 1 if request.form.get('is_active') == 'on' else 0
+        module_type = request.form.get('module_type') or None
+        content_id = request.form.get('content_id') or None
+        if content_id:
+            try:
+                content_id = int(content_id)
+            except ValueError:
+                content_id = None
+        if not title:
+            flash('Task title is required')
+        else:
+            conn.execute('''UPDATE tasks SET title=?, description=?, department=?, due_date=?, is_active=?, module_type=?, content_id=?
+                            WHERE id = ?''',
+                         (title, description, department, due_date, is_active, module_type, content_id, task_id))
+            conn.commit()
+            flash('Task updated')
+            # reload task
+            task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    # content lists
+    biographies = conn.execute('SELECT id, person_name AS name, title FROM biographies ORDER BY created_at DESC').fetchall()
+    listening_items = conn.execute('SELECT id, title FROM listening_content ORDER BY created_at DESC').fetchall()
+    observation_items = conn.execute('SELECT id, title FROM observation_content ORDER BY created_at DESC').fetchall()
+    writing_topics = conn.execute('SELECT id, topic AS title FROM writing_topics ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return render_template('admin_task_edit.html', task=task,
+                           biographies=biographies,
+                           listening_items=listening_items,
+                           observation_items=observation_items,
+                           writing_topics=writing_topics)
+
+@app.route('/admin/practices')
+def admin_manage_practices():
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    speaking = conn.execute('SELECT * FROM biographies ORDER BY created_at DESC').fetchall()
+    listening = conn.execute('SELECT * FROM listening_content ORDER BY created_at DESC').fetchall()
+    observation = conn.execute('SELECT * FROM observation_content ORDER BY created_at DESC').fetchall()
+    conn.close()
+    return render_template('admin_manage_practices.html', speaking=speaking, listening=listening, observation=observation)
+
+@app.route('/admin/speaking/<int:bio_id>/edit', methods=['GET', 'POST'])
+def admin_edit_speaking(bio_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    bio = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
+    if not bio:
+        conn.close()
+        flash('Speaking passage not found', 'error')
+        return redirect(url_for('admin_manage_practices'))
+    if request.method == 'POST':
+        person_name = request.form.get('person_name', '').strip()
+        title = request.form.get('title', '').strip()
+        profession = request.form.get('profession', 'Other').strip() or 'Other'
+        content = request.form.get('content', '').strip()
+        conn.execute('''UPDATE biographies SET person_name = ?, title = ?, profession = ?, content = ? WHERE id = ?''',
+                     (person_name, title, profession, content, bio_id))
+        conn.commit()
+        conn.close()
+        flash('Speaking passage updated', 'success')
+        return redirect(url_for('admin_manage_practices'))
+    conn.close()
+    return render_template('admin_edit_speaking.html', bio=bio)
+
+@app.route('/admin/speaking/<int:bio_id>/delete', methods=['POST'])
+def admin_delete_speaking(bio_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    conn.execute('DELETE FROM biographies WHERE id = ?', (bio_id,))
+    conn.commit()
+    conn.close()
+    flash('Speaking passage removed', 'success')
+    return redirect(url_for('admin_manage_practices'))
+
+@app.route('/admin/listening/<int:content_id>/edit', methods=['GET', 'POST'])
+def admin_edit_listening(content_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    item = conn.execute('SELECT * FROM listening_content WHERE id = ?', (content_id,)).fetchone()
+    if not item:
+        conn.close()
+        flash('Listening content not found', 'error')
+        return redirect(url_for('admin_manage_practices'))
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        audio_file = request.form.get('audio_file', '').strip() or item['audio_file']
+        transcript = request.form.get('transcript', '').strip()
+        robot_character = request.form.get('robot_character', 'boy').strip() or 'boy'
+        conn.execute('''UPDATE listening_content SET title = ?, audio_file = ?, transcript = ?, robot_character = ? WHERE id = ?''',
+                     (title, audio_file, transcript, robot_character, content_id))
+        conn.commit()
+        conn.close()
+        flash('Listening content updated', 'success')
+        return redirect(url_for('admin_manage_practices'))
+    conn.close()
+    return render_template('admin_edit_listening.html', item=item)
+
+@app.route('/admin/listening/<int:content_id>/delete', methods=['POST'])
+def admin_delete_listening(content_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    conn.execute('DELETE FROM listening_content WHERE id = ?', (content_id,))
+    conn.commit()
+    conn.close()
+    flash('Listening content removed', 'success')
+    return redirect(url_for('admin_manage_practices'))
+
+@app.route('/admin/observation/<int:obs_id>/edit', methods=['GET', 'POST'])
+def admin_edit_observation(obs_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    item = conn.execute('SELECT * FROM observation_content WHERE id = ?', (obs_id,)).fetchone()
+    if not item:
+        conn.close()
+        flash('Observation content not found', 'error')
+        return redirect(url_for('admin_manage_practices'))
+    if request.method == 'POST':
+        title = request.form.get('title', '').strip()
+        video_url = request.form.get('video_url', '').strip()
+        questions = request.form.get('questions', '').strip()
+        correct_answers = request.form.get('correct_answers', '').strip()
+        conn.execute('''UPDATE observation_content SET title = ?, video_url = ?, questions = ?, correct_answers = ? WHERE id = ?''',
+                     (title, video_url, questions, correct_answers, obs_id))
+        conn.commit()
+        conn.close()
+        flash('Observation content updated', 'success')
+        return redirect(url_for('admin_manage_practices'))
+    conn.close()
+    return render_template('admin_edit_observation.html', item=item)
+
+@app.route('/admin/observation/<int:obs_id>/delete', methods=['POST'])
+def admin_delete_observation(obs_id):
+    if 'admin_id' not in session:
+        return redirect(url_for('admin_login'))
+    conn = get_db_connection()
+    conn.execute('DELETE FROM observation_content WHERE id = ?', (obs_id,))
+    conn.commit()
+    conn.close()
+    flash('Observation content removed', 'success')
+    return redirect(url_for('admin_manage_practices'))
+
 @app.route('/leaderboard')
 def leaderboard():
     conn = get_db_connection()
@@ -957,6 +1544,96 @@ def leaderboard():
     conn.close()
     
     return render_template('leaderboard.html', top_users=top_users)
+
+# -------- Profile and Certificate Routes --------
+@app.route('/profile', methods=['GET', 'POST'])
+def profile():
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    if request.method == 'POST':
+        new_username = request.form.get('username', '').strip()
+        new_department = request.form.get('department', '').strip()
+        try:
+            if new_username:
+                conn.execute('UPDATE users SET username = ? WHERE id = ?', (new_username, session['user_id']))
+                session['username'] = new_username
+            if new_department:
+                conn.execute('UPDATE users SET department = ? WHERE id = ?', (new_department, session['user_id']))
+                session['department'] = new_department
+            conn.commit()
+            flash('Profile updated successfully', 'success')
+            # refresh user
+            user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+        except sqlite3.IntegrityError:
+            flash('Username already taken. Please choose another.', 'error')
+        finally:
+            conn.close()
+        return redirect(url_for('profile'))
+    conn.close()
+    return render_template('profile.html', user=user)
+
+@app.route('/certificate')
+def certificate_view():
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    conn.close()
+    eligible = is_certificate_ready(session['user_id'])
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    return render_template('certificate.html', user=user, eligible=eligible, reportlab=REPORTLAB_AVAILABLE, today=today_str)
+
+@app.route('/certificate/download')
+def certificate_download():
+    if 'user_id' not in session:
+        return redirect(url_for('index'))
+    if not is_certificate_ready(session['user_id']):
+        flash('Complete all modules (Speaking, Listening, Writing, Observation) to unlock your certificate.', 'warning')
+        return redirect(url_for('certificate_view'))
+    if not REPORTLAB_AVAILABLE:
+        flash('PDF generator is not installed on the server. Use the Print Certificate option.', 'warning')
+        return redirect(url_for('certificate_view'))
+    # Generate PDF in-memory
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    conn.close()
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+    # Header
+    c.setFont('Helvetica-Bold', 24)
+    c.drawCentredString(width/2, height - 3*cm, 'Certificate of Completion')
+    c.setFont('Helvetica', 12)
+    c.drawCentredString(width/2, height - 4*cm, 'Shakespeare Club - Communication Skills Program')
+    # Recipient
+    c.setFont('Helvetica-Bold', 18)
+    c.drawCentredString(width/2, height - 7*cm, f"This certifies that {user['username']}")
+    c.setFont('Helvetica', 12)
+    c.drawCentredString(width/2, height - 8*cm, f"Department: {user['department']}")
+    # Body
+    c.drawCentredString(width/2, height - 10*cm, 'has successfully completed all practice modules:')
+    c.drawCentredString(width/2, height - 11*cm, 'Speaking, Listening, Writing, and Observation')
+    # Footer
+    today_str = datetime.now().strftime('%Y-%m-%d')
+    c.drawCentredString(width/2, 3*cm, f"Date: {today_str}")
+    c.setFont('Helvetica-Oblique', 10)
+    c.drawRightString(width - 2*cm, 2*cm, 'Shakespeare Club')
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    filename = f"Certificate_{user['username']}.pdf"
+    return send_file(buf, as_attachment=True, download_name=filename, mimetype='application/pdf')
+
+# Help mobile browsers by explicitly allowing microphone via headers (useful in iframes/PWAs)
+@app.after_request
+def add_mic_permissions_headers(response):
+    # Permissions-Policy replaces Feature-Policy in modern browsers
+    response.headers['Permissions-Policy'] = "microphone=(self)"
+    # For older browsers still reading Feature-Policy
+    response.headers['Feature-Policy'] = "microphone 'self'"
+    return response
 
 @app.route('/logout')
 def logout():

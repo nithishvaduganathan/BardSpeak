@@ -29,6 +29,39 @@
             </div>
         </div>
 
+        <!-- Analysis Result -->
+        <div class="row mt-3" id="analysisRow" style="display:none;">
+            <div class="col-12">
+                <div class="game-card">
+                    <h5><i class="fas fa-chart-line me-2"></i>Analysis Result</h5>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <div class="module-card speaking">
+                                <h6 class="mb-2">Similarity</h6>
+                                <div id="simValue" style="font-size:2rem; font-weight:800; color: var(--speaking-color);">0%</div>
+                                <small class="text-muted">Match with target passage</small>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="module-card speaking">
+                                <h6 class="mb-2">Recognized Transcript</h6>
+                                <div id="recognizedText" class="no-copy" style="max-height:160px; overflow:auto; white-space:pre-wrap;"></div>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="module-card speaking">
+                                <h6 class="mb-2">Target Passage (excerpt)</h6>
+                                <div id="targetExcerpt" class="no-copy" style="max-height:160px; overflow:auto; white-space:pre-wrap;">{{ biography.content[:400] }}{% if biography.content|length > 400 %}...{% endif %}</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-end">
+                        <small class="text-muted">You will be redirected to Speaking in a moment…</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Biography Content -->
         <div class="row mb-4">
             <div class="col-12">
@@ -61,11 +94,9 @@
                     <h5><i class="fas fa-bullhorn me-2"></i>Speaking Instructions</h5>
                     <div class="alert alert-info">
                         <ol class="mb-0">
-                            <li><strong>Read Clearly:</strong> Read the biography above in a clear, confident voice</li>
-                            <li><strong>Proper Pronunciation:</strong> Focus on correct pronunciation of each word</li>
-                            <li><strong>Natural Pace:</strong> Speak at a natural, conversational pace</li>
-                            <li><strong>Expression:</strong> Add appropriate emotion and emphasis</li>
-                            <li><strong>Record Your Reading:</strong> Type what you read in the box below for AI analysis</li>
+                            <li><strong>Read Clearly:</strong> Read the biography above in a clear, confident voice.</li>
+                            <li><strong>Natural Pace & Expression:</strong> Keep a natural pace, add emotion and emphasis.</li>
+                            <li><strong>Voice Only:</strong> Press Record, speak the passage, then Stop to submit for AI analysis.</li>
                         </ol>
                     </div>
                 </div>
@@ -76,31 +107,32 @@
         <div class="row">
             <div class="col-12">
                 <div class="game-card">
-                    <form id="speakingForm" method="POST" action="{{ url_for('submit_speaking') }}">
-                        <input type="hidden" name="bio_id" value="{{ biography.id }}">
-                        
-                        <div class="mb-4">
-                            <label for="recorded_text" class="form-label">
-                                <i class="fas fa-keyboard me-2"></i>Type Your Reading Here:
-                            </label>
-                            <textarea class="form-control game-input no-copy" 
-                                      id="recorded_text" 
-                                      name="recorded_text" 
-                                      rows="10" 
-                                      placeholder="Type what you just read aloud here. The AI will compare your text with the original biography to check accuracy..."
-                                      required></textarea>
-                            <small class="text-muted">💡 Read the biography aloud first, then type what you read for AI analysis</small>
-                        </div>
-                        
-                        <div class="text-center">
-                            <button type="button" class="btn btn-speaking btn-lg me-2" onclick="startSpeakingPractice()">
-                                <i class="fas fa-microphone me-2"></i>Start Recording Practice
+                    <div class="text-center mb-3">
+                        <div id="recordStatus" class="text-muted mb-2">Ready to record.</div>
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-speaking btn-lg" id="btnRecord">
+                                <i class="fas fa-microphone me-2"></i>Record
                             </button>
-                            <button type="submit" class="btn btn-game-primary btn-lg" id="submitBtn">
-                                <i class="fas fa-brain me-2"></i>Analyze My Speaking
+                            <button type="button" class="btn btn-outline-danger btn-lg" id="btnStop" disabled>
+                                <i class="fas fa-stop me-2"></i>Stop
+                            </button>
+                            <button type="button" class="btn btn-game-primary btn-lg" id="btnSubmit" disabled>
+                                <i class="fas fa-brain me-2"></i>Submit for Analysis
                             </button>
                         </div>
-                    </form>
+                        <div class="mt-2"><small id="attemptsInfo" class="text-muted">Attempts left: 3</small></div>
+                        <div class="mt-2">
+                            <button type="button" class="btn btn-outline-light btn-sm" id="btnEnableMic" style="display:none;">
+                                <i class="fas fa-microphone"></i> Enable Microphone
+                            </button>
+                            <div class="text-muted" style="font-size:0.9rem;">
+                                <small>Tip: On mobile devices, use HTTPS and allow microphone permission when prompted.</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="text-center">
+                        <audio id="preview" controls style="display:none; width:100%"></audio>
+                    </div>
                 </div>
             </div>
         </div>
@@ -113,78 +145,256 @@
     <script src="{{ url_for('static', filename='js/gamified.js') }}"></script>
     
     <script>
-        function startSpeakingPractice() {
-            showFlashMessage('🎤 Start reading the biography aloud! Take your time and speak clearly.', 'info');
-            
-            // Highlight the biography text for reading
-            const biographyText = document.getElementById('biographyText');
-            biographyText.style.background = 'linear-gradient(45deg, rgba(231, 76, 60, 0.1) 0%, rgba(192, 57, 43, 0.1) 100%)';
-            biographyText.style.border = '2px solid var(--speaking-color)';
-            biographyText.style.borderRadius = '10px';
-            biographyText.style.padding = '20px';
-            
-            // After 30 seconds, prompt to type
-            setTimeout(() => {
-                showFlashMessage('✅ Great! Now type what you just read in the text area below.', 'success');
-                document.getElementById('recorded_text').focus();
-                
-                // Remove highlight
-                biographyText.style.background = '';
-                biographyText.style.border = '';
-                biographyText.style.borderRadius = '';
-                biographyText.style.padding = '';
-            }, 30000);
+        // Voice-only recording using MediaRecorder
+        const btnRecord = document.getElementById('btnRecord');
+        const btnStop = document.getElementById('btnStop');
+        const statusEl = document.getElementById('recordStatus');
+        const preview = document.getElementById('preview');
+        const bioId = '{{ biography.id }}';
+        let mediaRecorder;
+        let chunks = [];
+        let lastBlob = null;
+        let tries = 0;
+        let streamRef = null;
+        let audioCtx = null;
+
+        // Pick a supported audio mime type
+        function chooseMime() {
+            const candidates = [
+                'audio/webm;codecs=opus',
+                'audio/webm',
+                'audio/mp4',
+                'audio/ogg'
+            ];
+            for (const m of candidates) {
+                if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) return m;
+            }
+            return undefined;
         }
 
-        // Handle form submission with celebration
-        document.getElementById('speakingForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            const submitBtn = document.getElementById('submitBtn');
-            const originalText = submitBtn.innerHTML;
-            
-            // Show loading
-            submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Analyzing Speech...';
-            submitBtn.disabled = true;
-            
-            // Submit form data
-            const formData = new FormData(this);
-            
-            fetch('{{ url_for("submit_speaking") }}', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
-                
+        async function getAudioStream() {
+            const constraints = { audio: { echoCancellation: true, noiseSuppression: true } };
+            // Standard API
+            if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                return await navigator.mediaDevices.getUserMedia(constraints);
+            }
+            // iOS/Safari legacy fallback
+            return new Promise((resolve, reject) => {
+                const getUM = navigator.getUserMedia || navigator.webkitGetUserMedia || navigator.mozGetUserMedia;
+                if (!getUM) return reject(new Error('getUserMedia not supported'));
+                getUM.call(navigator, constraints, resolve, reject);
+            });
+        }
+
+        async function requestMicPermission() {
+            try {
+                if (streamRef) return streamRef;
+                streamRef = await getAudioStream();
+                document.getElementById('btnEnableMic').style.display = 'none';
+                return streamRef;
+            } catch (e) {
+                document.getElementById('btnEnableMic').style.display = 'inline-block';
+                throw e;
+            }
+        }
+
+        // Encode a Blob (webm/ogg) to 16-bit PCM WAV mono 16kHz in browser
+        async function encodeBlobToWav(blob) {
+            try {
+                audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+                const arrayBuffer = await blob.arrayBuffer();
+                // First decode using current context
+                const decoded = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+                const duration = decoded.duration;
+                const channels = 1; // mono
+                const sampleRate = 16000; // target sample rate
+                // Resample using OfflineAudioContext if available
+                if (window.OfflineAudioContext || window.webkitOfflineAudioContext) {
+                    const OfflineCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+                    const length = Math.ceil(sampleRate * duration);
+                    const offline = new OfflineCtx(channels, length, sampleRate);
+                    const src = offline.createBufferSource();
+                    // Downmix to mono if needed
+                    let monoBuffer;
+                    if (decoded.numberOfChannels > 1) {
+                        const tmp = offline.createBuffer(1, decoded.length, decoded.sampleRate);
+                        const ch0 = decoded.getChannelData(0);
+                        const ch1 = decoded.getChannelData(1);
+                        const mono = tmp.getChannelData(0);
+                        const len = Math.min(ch0.length, ch1.length);
+                        for (let i = 0; i < len; i++) mono[i] = 0.5 * (ch0[i] + ch1[i]);
+                        monoBuffer = tmp;
+                    } else {
+                        monoBuffer = decoded;
+                    }
+                    src.buffer = monoBuffer;
+                    src.connect(offline.destination);
+                    src.start();
+                    const rendered = await offline.startRendering();
+                    return pcm16ToWavBlob(rendered.getChannelData(0), rendered.sampleRate);
+                }
+                // Fallback: no resample, just take first channel
+                const ch = decoded.getChannelData(0);
+                return pcm16ToWavBlob(ch, decoded.sampleRate);
+            } catch (e) {
+                console.error('WAV encode failed', e);
+                throw e;
+            }
+        }
+
+        function pcm16ToWavBlob(channelData, sampleRate) {
+            // Convert float [-1,1] to 16-bit PCM
+            const pcm16 = new Int16Array(channelData.length);
+            for (let i = 0; i < channelData.length; i++) {
+                let s = Math.max(-1, Math.min(1, channelData[i]));
+                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            const wavBuffer = encodeWAV(pcm16, sampleRate, 1);
+            return new Blob([wavBuffer], { type: 'audio/wav' });
+        }
+
+        function encodeWAV(samples, sampleRate, numChannels) {
+            const bytesPerSample = 2;
+            const blockAlign = numChannels * bytesPerSample;
+            const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+            const view = new DataView(buffer);
+            // RIFF header
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+            writeString(view, 8, 'WAVE');
+            // fmt  chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+            view.setUint16(20, 1, true);  // AudioFormat (1=PCM)
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * blockAlign, true); // ByteRate
+            view.setUint16(32, blockAlign, true); // BlockAlign
+            view.setUint16(34, 16, true); // BitsPerSample
+            // data chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, samples.length * bytesPerSample, true);
+            // PCM samples
+            let offset = 44;
+            for (let i = 0; i < samples.length; i++, offset += 2) {
+                view.setInt16(offset, samples[i], true);
+            }
+            return view;
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        btnRecord.addEventListener('click', async () => {
+            if (tries >= 3) {
+                showFlashMessage('You have reached the maximum of 3 attempts.', 'error');
+                return;
+            }
+            try {
+                const stream = await requestMicPermission();
+                const mime = chooseMime();
+                if (!window.MediaRecorder) {
+                    showFlashMessage('Recording not supported on this device/browser.', 'error');
+                    return;
+                }
+                mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+                chunks = [];
+                mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+                mediaRecorder.onstart = () => {
+                    statusEl.textContent = 'Recording... Speak clearly while reading the passage.';
+                    btnRecord.disabled = true;
+                    btnStop.disabled = false;
+                    btnSubmit.disabled = true;
+                };
+                mediaRecorder.onstop = async () => {
+                    lastBlob = new Blob(chunks, { type: 'audio/webm' });
+                    preview.src = URL.createObjectURL(lastBlob);
+                    preview.style.display = 'block';
+                    tries += 1;
+                    const left = Math.max(0, 3 - tries);
+                    document.getElementById('attemptsInfo').textContent = `Attempts left: ${left}`;
+                    statusEl.textContent = 'Recording finished. Preview and click Submit for Analysis.';
+                    btnStop.disabled = true;
+                    btnSubmit.disabled = false;
+                    if (tries >= 3) {
+                        btnRecord.disabled = true;
+                        statusEl.textContent = 'Maximum attempts reached. Please submit the last recording.';
+                    } else {
+                        btnRecord.disabled = false;
+                    }
+                };
+                mediaRecorder.start();
+            } catch (err) {
+                showFlashMessage('Microphone permission denied or unavailable.', 'error');
+                document.getElementById('btnEnableMic').style.display = 'inline-block';
+            }
+        });
+
+        btnStop.addEventListener('click', () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                mediaRecorder.stop();
+                btnStop.disabled = true;
+            }
+        });
+
+        // Submit the last recorded audio for analysis
+        document.getElementById('btnSubmit').addEventListener('click', async () => {
+            if (!lastBlob) {
+                showFlashMessage('Please record your speaking first.', 'error');
+                return;
+            }
+            statusEl.textContent = 'Uploading and analyzing...';
+            btnSubmit.disabled = true;
+            btnRecord.disabled = true;
+            try {
+                const formData = new FormData();
+                formData.append('bio_id', bioId);
+                // Convert to WAV in-browser
+                let wavBlob;
+                try {
+                    wavBlob = await encodeBlobToWav(lastBlob);
+                } catch (e) {
+                    // Fallback to original blob if WAV encode fails
+                    wavBlob = lastBlob;
+                }
+                const filename = wavBlob.type === 'audio/wav' ? 'recording.wav' : 'recording.webm';
+                formData.append('audio', wavBlob, filename);
+                const resp = await fetch('{{ url_for("submit_speaking_audio") }}', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    showFlashMessage(data.error || 'Transcription failed', 'error');
+                    statusEl.textContent = 'Ready to record.';
+                    btnSubmit.disabled = false;
+                    if (tries < 3) btnRecord.disabled = false;
+                    return;
+                }
+                // Show analysis result on the page
+                document.getElementById('analysisRow').style.display = 'block';
+                document.getElementById('recognizedText').textContent = data.transcript || '';
+                document.getElementById('simValue').textContent = `${data.similarity.toFixed(1)}%`;
+
                 if (data.celebration) {
-                    // Trigger celebration animation
                     triggerCelebration(data.points);
-                    
-                    // Show success message with flowers and hearts
                     setTimeout(() => {
                         showFlashMessage(`🎉 Excellent speaking! Similarity: ${data.similarity.toFixed(1)}% | Points earned: ${data.points}`, 'success');
-                        
-                        // Redirect after celebration
-                        setTimeout(() => {
-                            window.location.href = '{{ url_for("speaking_module") }}';
-                        }, 3000);
-                    }, 1000);
+                        setTimeout(() => { window.location.href = '{{ url_for("speaking_module") }}'; }, 4000);
+                    }, 800);
                 } else {
-                    showFlashMessage(`Good effort! Similarity: ${data.similarity.toFixed(1)}% | Points earned: ${data.points}. Keep practicing!`, 'info');
-                    
-                    setTimeout(() => {
-                        window.location.href = '{{ url_for("speaking_module") }}';
-                    }, 2000);
+                    showFlashMessage(`Good effort! Similarity: ${data.similarity.toFixed(1)}% | Points earned: ${data.points}`, 'info');
+                    setTimeout(() => { window.location.href = '{{ url_for("speaking_module") }}'; }, 3500);
                 }
-            })
-            .catch(error => {
-                submitBtn.innerHTML = originalText;
-                submitBtn.disabled = false;
-                showFlashMessage('Error submitting practice. Please try again.', 'error');
-            });
+            } catch (e) {
+                showFlashMessage('Error uploading audio. Please try again.', 'error');
+                statusEl.textContent = 'Ready to record.';
+                btnSubmit.disabled = false;
+                if (tries < 3) btnRecord.disabled = false;
+            }
         });
     </script>
 </body>

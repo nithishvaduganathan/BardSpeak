@@ -15,7 +15,7 @@ from pydantic import BaseModel
 # The SDK was recently renamed from google-generativeai to google-genai. This file reflects the new name and the new APIs.
 
 # This API key is from Gemini Developer API Key, not vertex AI API Key
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+client = genai.Client(api_key="AIzaSyB32kRLOKH9QaJtv-Obg0TXIO1lRZD3UoE")
 
 
 def summarize_article(text: str) -> str:

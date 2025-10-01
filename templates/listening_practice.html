@@ -39,10 +39,9 @@
                     <h4>{{ content.robot_character.title() }} Robot</h4>
                     <p class="text-muted">Hi! I'm going to speak to you. Listen carefully and type exactly what I say!</p>
                     
-                    <div class="robot-speech" id="robotSpeech" style="display: none;">
-                        <p><strong>Robot says:</strong> "{{ content.transcript }}"</p>
-                    </div>
-                    
+                    <!-- Hidden audio element for playback -->
+                    <audio id="practiceAudio" preload="auto" src="{{ url_for('static', filename='audio/' + content.audio_file) }}"></audio>
+
                     <button class="btn btn-listening btn-lg" id="playAudioBtn" onclick="playRobotAudio()">
                         <i class="fas fa-play me-2"></i>Play Audio
                     </button>
@@ -102,44 +101,44 @@
     
     <script>
         let audioPlayed = false;
-        
+
         function playRobotAudio() {
             const robot = document.getElementById('robotCharacter');
             const playBtn = document.getElementById('playAudioBtn');
             const textArea = document.getElementById('user_input');
             const submitBtn = document.getElementById('submitBtn');
-            const robotSpeech = document.getElementById('robotSpeech');
-            
-            // Animate robot speaking
-            animateRobot('speak');
-            robot.style.background = 'linear-gradient(135deg, #3498db 0%, #2980b9 100%)';
-            robot.style.animation = 'robotSpeak 0.5s ease-in-out infinite';
-            
-            playBtn.innerHTML = '<i class="fas fa-volume-up me-2"></i>Speaking...';
-            playBtn.disabled = true;
-            
-            // Show what robot is saying (simulated audio)
-            setTimeout(() => {
-                robotSpeech.style.display = 'block';
-                showFlashMessage('🔊 Robot is speaking! Listen carefully...', 'info');
-            }, 1000);
-            
-            // Simulate audio duration (8 seconds)
-            setTimeout(() => {
+            const audio = document.getElementById('practiceAudio');
+
+            if (!audio) {
+                showFlashMessage('Audio file missing. Please contact admin.', 'error');
+                return;
+            }
+
+            // Reset and play
+            audio.currentTime = 0;
+            audio.play().then(() => {
+                // Animate robot speaking while audio plays
+                animateRobot('speak');
+                robot.style.background = 'linear-gradient(135deg, #3498db 0%, #2980b9 100%)';
+                robot.style.animation = 'robotSpeak 0.5s ease-in-out infinite';
+                playBtn.innerHTML = '<i class="fas fa-volume-up me-2"></i>Playing...';
+                playBtn.disabled = true;
+            }).catch(() => {
+                showFlashMessage('Unable to play audio. Check browser permissions.', 'warning');
+            });
+
+            // When audio ends, enable typing
+            audio.onended = () => {
                 robot.style.animation = 'robotBob 2s ease-in-out infinite';
                 robot.style.background = 'var(--primary-gradient)';
-                
                 playBtn.innerHTML = '<i class="fas fa-redo me-2"></i>Play Again';
                 playBtn.disabled = false;
-                
-                // Enable typing
                 textArea.disabled = false;
                 submitBtn.disabled = false;
                 textArea.focus();
-                
                 showFlashMessage('✅ Audio finished! Now type what you heard in the text area.', 'success');
                 audioPlayed = true;
-            }, 8000);
+            };
         }
 
         // Handle form submission
