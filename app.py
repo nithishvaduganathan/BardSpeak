@@ -1,14 +1,20 @@
+# app.py (PostgreSQL / SQLAlchemy version)
 import os
-import sqlite3
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, date
-import json
-from gemini import analyze_sentiment, analyze_communication_practice
-import random
 import io
+import json
+import random
+from datetime import datetime, date, timedelta
+
+from flask import (
+    Flask, render_template, request, redirect, url_for, session,
+    flash, jsonify, send_file
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
+
 from pydub import AudioSegment
 import speech_recognition as sr
+
 # Optional PDF generation for certificates
 try:
     from reportlab.pdfgen import canvas
@@ -17,11 +23,22 @@ try:
     REPORTLAB_AVAILABLE = True
 except Exception:
     REPORTLAB_AVAILABLE = False
+
 try:
     from gtts import gTTS
 except Exception:
     gTTS = None
 
+# Gemini AI helpers (kept as-is)
+from gemini import analyze_sentiment, analyze_communication_practice
+
+# Flask + SQLAlchemy
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, and_, or_, text
+
+# -------------------------
+# App and config
+# -------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get('SESSION_SECRET', 'shakespeare-club-secret-key')
 
@@ -33,256 +50,244 @@ if FFMPEG_BIN:
 if FFPROBE_BIN:
     AudioSegment.ffprobe = FFPROBE_BIN
 
-# Database initialization for gamified app
-def init_db():
-    conn = sqlite3.connect('shakespeare_club_gamified.db')
-    c = conn.cursor()
-    
-    # Users table (simplified registration)
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        register_number TEXT UNIQUE NOT NULL,
-        department TEXT NOT NULL,
-        total_points INTEGER DEFAULT 0,
-        current_streak INTEGER DEFAULT 0,
-        best_streak INTEGER DEFAULT 0,
-        badges TEXT DEFAULT '[]',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    # Admins table
-    c.execute('''CREATE TABLE IF NOT EXISTS admins (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )''')
-    
-    # Content tables for each module
-    c.execute('''CREATE TABLE IF NOT EXISTS biographies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        person_name TEXT NOT NULL,
-        content TEXT NOT NULL,
-        profession TEXT NOT NULL,
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES admins (id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS daily_quotes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        quote TEXT NOT NULL,
-        author TEXT,
-        posted_by INTEGER NOT NULL,
-        department TEXT NOT NULL,
-        post_date DATE NOT NULL,
-        is_featured BOOLEAN DEFAULT FALSE,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (posted_by) REFERENCES users (id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS listening_content (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        audio_file TEXT NOT NULL,
-        transcript TEXT NOT NULL,
-        robot_character TEXT DEFAULT 'boy',
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES admins (id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS observation_content (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        video_url TEXT NOT NULL,
-        questions TEXT NOT NULL,
-        correct_answers TEXT NOT NULL,
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES admins (id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS writing_topics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        topic TEXT NOT NULL,
-        description TEXT,
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (created_by) REFERENCES admins (id)
-    )''')
-    
-    # Tasks table for admin-assigned tasks visible on student dashboard
-    c.execute('''CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        description TEXT,
-        department TEXT DEFAULT 'ALL',
-        due_date DATE,
-        is_active BOOLEAN DEFAULT TRUE,
-        created_by INTEGER,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        module_type TEXT,
-        content_id INTEGER,
-        FOREIGN KEY (created_by) REFERENCES admins (id)
-    )''')
+# Database config: use DATABASE_URL env var from Render
+# Example (Render): postgres://<user>:<pw>@<host>:5432/bardspeak-db
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    'DATABASE_URL',
+    'postgresql://localhost/bardspeak-db'  # fallback (developer machine)
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-    # Ensure new columns exist on older databases
-    existing_cols = [r[1] for r in c.execute('PRAGMA table_info(tasks)').fetchall()]
-    if 'module_type' not in existing_cols:
-        try:
-            c.execute('ALTER TABLE tasks ADD COLUMN module_type TEXT')
-        except Exception:
-            pass
-    if 'content_id' not in existing_cols:
-        try:
-            c.execute('ALTER TABLE tasks ADD COLUMN content_id INTEGER')
-        except Exception:
-            pass
-    
-    # User activities and completions
-    c.execute('''CREATE TABLE IF NOT EXISTS user_completions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        module_type TEXT NOT NULL,
-        content_id INTEGER NOT NULL,
-        score INTEGER NOT NULL,
-        points_earned INTEGER NOT NULL,
-        completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS user_streaks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        streak_date DATE NOT NULL,
-        modules_completed INTEGER DEFAULT 0,
-        points_earned INTEGER DEFAULT 0,
-        FOREIGN KEY (user_id) REFERENCES users (id)
-    )''')
-    
-    # Track speaking attempts to enforce limit
-    c.execute('''CREATE TABLE IF NOT EXISTS speaking_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        bio_id INTEGER NOT NULL,
-        attempt_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (user_id) REFERENCES users (id),
-        FOREIGN KEY (bio_id) REFERENCES biographies (id)
-    )''')
-    
-    # Insert default admin
-    c.execute("SELECT * FROM admins WHERE username = 'admin'")
-    if not c.fetchone():
-        admin_password_hash = generate_password_hash('admin123')
-        c.execute("INSERT INTO admins (username, password_hash) VALUES (?, ?)", 
-                 ('admin', admin_password_hash))
-        admin_id = c.lastrowid
-        
-        # Insert sample content
+db = SQLAlchemy(app)
+
+# -------------------------
+# Models (mirror previous SQLite schema)
+# -------------------------
+class User(db.Model):
+    __tablename__ = 'users'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    register_number = db.Column(db.String(150), unique=True, nullable=False)
+    department = db.Column(db.String(150), nullable=False)
+    total_points = db.Column(db.Integer, default=0)
+    current_streak = db.Column(db.Integer, default=0)
+    best_streak = db.Column(db.Integer, default=0)
+    badges = db.Column(db.Text, default='[]')
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Admin(db.Model):
+    __tablename__ = 'admins'
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    password_hash = db.Column(db.String(300), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Biography(db.Model):
+    __tablename__ = 'biographies'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(300), nullable=False)
+    person_name = db.Column(db.String(300), nullable=False)
+    content = db.Column(db.Text, nullable=False)
+    profession = db.Column(db.String(150), nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class DailyQuote(db.Model):
+    __tablename__ = 'daily_quotes'
+    id = db.Column(db.Integer, primary_key=True)
+    quote = db.Column(db.Text, nullable=False)
+    author = db.Column(db.String(200))
+    posted_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    department = db.Column(db.String(150), nullable=False)
+    post_date = db.Column(db.Date, nullable=False)
+    is_featured = db.Column(db.Boolean, default=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ListeningContent(db.Model):
+    __tablename__ = 'listening_content'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(300), nullable=False)
+    audio_file = db.Column(db.String(500), nullable=False)
+    transcript = db.Column(db.Text, nullable=False)
+    robot_character = db.Column(db.String(50), default='boy')
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ObservationContent(db.Model):
+    __tablename__ = 'observation_content'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(300), nullable=False)
+    video_url = db.Column(db.String(500), nullable=False)
+    questions = db.Column(db.Text, nullable=False)
+    correct_answers = db.Column(db.Text, nullable=False)
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class WritingTopic(db.Model):
+    __tablename__ = 'writing_topics'
+    id = db.Column(db.Integer, primary_key=True)
+    topic = db.Column(db.String(300), nullable=False)
+    description = db.Column(db.Text)
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Task(db.Model):
+    __tablename__ = 'tasks'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(300), nullable=False)
+    description = db.Column(db.Text)
+    department = db.Column(db.String(100), default='ALL')
+    due_date = db.Column(db.Date, nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('admins.id'), nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    module_type = db.Column(db.String(100), nullable=True)
+    content_id = db.Column(db.Integer, nullable=True)
+
+class UserCompletion(db.Model):
+    __tablename__ = 'user_completions'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    module_type = db.Column(db.String(50), nullable=False)
+    content_id = db.Column(db.Integer, nullable=False)
+    score = db.Column(db.Integer, nullable=False)
+    points_earned = db.Column(db.Integer, nullable=False)
+    completed_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class UserStreak(db.Model):
+    __tablename__ = 'user_streaks'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    streak_date = db.Column(db.Date, nullable=False)
+    modules_completed = db.Column(db.Integer, default=0)
+    points_earned = db.Column(db.Integer, default=0)
+
+class SpeakingAttempt(db.Model):
+    __tablename__ = 'speaking_attempts'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    bio_id = db.Column(db.Integer, db.ForeignKey('biographies.id'), nullable=False)
+    attempt_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# -------------------------
+# One-time sample data initializer (mirrors previous init_db())
+# -------------------------
+def ensure_sample_data():
+    """Create default admin and sample content if not present.
+       This will run on first app start (db.create_all() will be called first).
+    """
+    # default admin
+    admin = Admin.query.filter_by(username='admin').first()
+    if not admin:
+        admin = Admin(username='admin', password_hash=generate_password_hash('admin123'))
+        db.session.add(admin)
+        db.session.commit()
+
+        # sample biographies
         sample_biographies = [
-            ("MS Dhoni - The Captain Cool", "Mahendra Singh Dhoni", 
-             "Mahendra Singh Dhoni, known as Captain Cool, is one of the greatest cricket captains in history. Born on July 7, 1981, in Ranchi, Jharkhand, Dhoni rose from a small town to lead India to victory in the 2007 T20 World Cup, 2011 Cricket World Cup, and 2013 Champions Trophy. His calm demeanor under pressure and lightning-fast wicket-keeping skills made him a legend. Dhoni's leadership style was unique - he led by example, never panicked, and always believed in his team. Even in the most challenging situations, he maintained his composure and made strategic decisions that turned matches around.", 
-             "Cricketer", admin_id),
+            ("MS Dhoni - The Captain Cool", "Mahendra Singh Dhoni",
+             "Mahendra Singh Dhoni, known as Captain Cool, is one of the greatest cricket captains in history. Born on July 7, 1981, in Ranchi, Jharkhand, Dhoni rose from a small town to lead India to victory in the 2007 T20 World Cup, 2011 Cricket World Cup, and 2013 Champions Trophy. His calm demeanor under pressure and lightning-fast wicket-keeping skills made him a legend. Dhoni's leadership style was unique - he led by example, never panicked, and always believed in his team. Even in the most challenging situations, he maintained his composure and made strategic decisions that turned matches around.",
+             "Cricketer"),
             ("Dr. APJ Abdul Kalam - The Missile Man", "Dr. APJ Abdul Kalam",
              "Dr. Avul Pakir Jainulabdeen Abdul Kalam, known as the Missile Man of India, was born on October 15, 1931, in Rameswaram, Tamil Nadu. From humble beginnings selling newspapers to becoming India's 11th President, Dr. Kalam's journey is truly inspiring. He played a pivotal role in India's space and missile programs, leading projects like Agni and Prithvi missiles. His vision for India as a developed nation by 2020 motivated millions. Dr. Kalam was not just a scientist but also a teacher who loved interacting with students. His simplicity, dedication to education, and unwavering belief in the power of dreams made him the People's President.",
-             "Scientist", admin_id)
+             "Scientist")
         ]
-        
-        for title, name, content, profession, created_by in sample_biographies:
-            c.execute("INSERT INTO biographies (title, person_name, content, profession, created_by) VALUES (?, ?, ?, ?, ?)",
-                     (title, name, content, profession, created_by))
-        
-        # Sample listening content
+        for title, name, content, profession in sample_biographies:
+            bio = Biography(title=title, person_name=name, content=content, profession=profession, created_by=admin.id)
+            db.session.add(bio)
+
+        # sample listening content
         sample_listening = [
-            ("Robot Greeting", "audio_greeting.mp3", 
+            ("Robot Greeting", "audio_greeting.mp3",
              "Hello there! Welcome to the Shakespeare Club Communication App. I am your friendly learning companion. Today we will practice listening skills together. Are you ready to begin this exciting journey of improving your English communication? Let's start with something fun and educational!",
-             "boy", admin_id),
+             "boy"),
             ("Daily Motivation", "audio_motivation.mp3",
              "Good morning, dear students! Every day is a new opportunity to learn something amazing. Remember, communication is not just about speaking - it's about connecting with others, sharing ideas, and building relationships. Practice makes perfect, so keep working on your skills. You are capable of achieving great things!",
-             "girl", admin_id)
+             "girl")
         ]
-        
-        for title, audio_file, transcript, robot_character, created_by in sample_listening:
-            c.execute("INSERT INTO listening_content (title, audio_file, transcript, robot_character, created_by) VALUES (?, ?, ?, ?, ?)",
-                     (title, audio_file, transcript, robot_character, created_by))
-        
-        # Sample observation content
+        for title, audio_file, transcript, robot_character in sample_listening:
+            item = ListeningContent(title=title, audio_file=audio_file, transcript=transcript,
+                                    robot_character=robot_character, created_by=admin.id)
+            db.session.add(item)
+
+        # sample observation content
         sample_observation = [
             ("Success Mindset", "https://www.youtube.com/watch?v=motivational1",
              "What are the key points mentioned about achieving success? List three important qualities discussed in the video.",
-             "Hard work, Perseverance, Positive attitude", admin_id),
+             "Hard work, Perseverance, Positive attitude"),
             ("Communication Skills", "https://www.youtube.com/watch?v=communication1",
              "According to the video, what makes effective communication? Name two important elements.",
-             "Active listening, Clear expression", admin_id)
+             "Active listening, Clear expression")
         ]
-        
-        for title, video_url, questions, answers, created_by in sample_observation:
-            c.execute("INSERT INTO observation_content (title, video_url, questions, correct_answers, created_by) VALUES (?, ?, ?, ?, ?)",
-                     (title, video_url, questions, answers, created_by))
-        
-        # Sample writing topics
+        for title, video_url, questions, answers in sample_observation:
+            item = ObservationContent(title=title, video_url=video_url,
+                                      questions=questions, correct_answers=answers, created_by=admin.id)
+            db.session.add(item)
+
+        # sample writing topics
         sample_topics = [
-            ("My Dreams and Aspirations", "Write about your future goals and how you plan to achieve them.", admin_id),
-            ("The Importance of Communication", "Explain why good communication skills are essential in today's world.", admin_id),
-            ("A Person Who Inspires Me", "Describe someone who motivates you and explain why they are your inspiration.", admin_id)
+            ("My Dreams and Aspirations", "Write about your future goals and how you plan to achieve them."),
+            ("The Importance of Communication", "Explain why good communication skills are essential in today's world."),
+            ("A Person Who Inspires Me", "Describe someone who motivates you and explain why they are your inspiration.")
         ]
-        
-        for topic, description, created_by in sample_topics:
-            c.execute("INSERT INTO writing_topics (topic, description, created_by) VALUES (?, ?, ?)",
-                     (topic, description, created_by))
-    
-    conn.commit()
-    conn.close()
+        for topic, description in sample_topics:
+            t = WritingTopic(topic=topic, description=description, created_by=admin.id)
+            db.session.add(t)
 
-def get_db_connection():
-    conn = sqlite3.connect('shakespeare_club_gamified.db')
-    conn.row_factory = sqlite3.Row
-    return conn
+        db.session.commit()
 
+# -------------------------
+# Helper functions (converted to ORM)
+# -------------------------
 def calculate_badge_progress(user_id):
-    """Calculate badges based on user achievements"""
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (user_id,)).fetchone()
-    completions = conn.execute('SELECT * FROM user_completions WHERE user_id = ?', (user_id,)).fetchall()
-    conn.close()
-    
+    """Calculate badges for a user and update user's badges field."""
+    user = User.query.get(user_id)
+    if not user:
+        return []
+
+    completions = UserCompletion.query.filter_by(user_id=user_id).all()
     badges = []
-    if user['total_points'] >= 100:
+    if user.total_points >= 100:
         badges.append("Century Scorer")
-    if user['best_streak'] >= 7:
+    if user.best_streak >= 7:
         badges.append("Week Warrior")
-    if user['best_streak'] >= 30:
+    if user.best_streak >= 30:
         badges.append("Monthly Master")
     if len(completions) >= 10:
         badges.append("Practice Champion")
     if len(completions) >= 50:
         badges.append("Communication Expert")
-    
-    # Update badges in database
-    conn = get_db_connection()
-    conn.execute('UPDATE users SET badges = ? WHERE id = ?', (json.dumps(badges), user_id))
-    conn.commit()
-    conn.close()
-    
+
+    user.badges = json.dumps(badges)
+    db.session.commit()
     return badges
 
 def is_certificate_ready(user_id):
-    """Eligibility: at least one completion in each module: speaking, listening, writing, observation"""
-    conn = get_db_connection()
-    rows = conn.execute('''
-        SELECT module_type, COUNT(*) as c
-        FROM user_completions
-        WHERE user_id = ? AND module_type IN ('speaking','listening','writing','observation')
-        GROUP BY module_type
-    ''', (user_id,)).fetchall()
-    conn.close()
-    have = {r['module_type'] for r in rows if r['c'] > 0}
+    """Eligibility: at least one completion in each module"""
+    rows = db.session.query(UserCompletion.module_type, func.count(UserCompletion.id)).\
+        filter(
+            UserCompletion.user_id == user_id,
+            UserCompletion.module_type.in_(['speaking','listening','writing','observation'])
+        ).group_by(UserCompletion.module_type).all()
+    have = {r[0] for r in rows if r[1] > 0}
     required = {'speaking','listening','writing','observation'}
     return required.issubset(have)
 
+# -------------------------
+# Upload / static config
+# -------------------------
+UPLOAD_DIR = os.path.join('static', 'audio')
+ALLOWED_AUDIO_EXTS = {'.mp3', '.wav', '.ogg', '.m4a', '.webm'}
+
+def ensure_upload_dir():
+    try:
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+# -------------------------
+# Routes (logic preserved, DB calls converted)
+# -------------------------
 @app.route('/')
 def index():
     return render_template('home.html')
@@ -290,298 +295,225 @@ def index():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        username = request.form['username']
-        register_number = request.form['register_number']
-        department = request.form['department']
-        
-        conn = get_db_connection()
-        try:
-            conn.execute('''INSERT INTO users (username, register_number, department)
-                           VALUES (?, ?, ?)''',
-                        (username, register_number, department))
-            conn.commit()
-            
-            # Get the new user
-            user = conn.execute('SELECT * FROM users WHERE register_number = ?', (register_number,)).fetchone()
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['department'] = user['department']
-            
-            flash('Welcome to Shakespeare Club! Your communication journey begins now! 🎭')
-            return redirect(url_for('dashboard'))
-        except sqlite3.IntegrityError:
+        username = request.form['username'].strip()
+        register_number = request.form['register_number'].strip()
+        department = request.form['department'].strip()
+
+        existing = User.query.filter(or_(User.username == username, User.register_number == register_number)).first()
+        if existing:
             flash('Username or register number already exists!')
-        finally:
-            conn.close()
-    
+            return render_template('register.html')
+
+        new_user = User(username=username, register_number=register_number, department=department)
+        db.session.add(new_user)
+        db.session.commit()
+
+        session['user_id'] = new_user.id
+        session['username'] = new_user.username
+        session['department'] = new_user.department
+
+        flash('Welcome to Shakespeare Club! Your communication journey begins now! 🎭')
+        return redirect(url_for('dashboard'))
     return render_template('register.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        register_number = request.form['register_number']
-        
-        conn = get_db_connection()
-        user = conn.execute('SELECT * FROM users WHERE register_number = ?', (register_number,)).fetchone()
-        conn.close()
-        
+        register_number = request.form['register_number'].strip()
+        user = User.query.filter_by(register_number=register_number).first()
         if user:
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['department'] = user['department']
-            flash(f'Welcome back, {user["username"]}! Ready for more communication practice? 🌟')
+            session['user_id'] = user.id
+            session['username'] = user.username
+            session['department'] = user.department
+            flash(f'Welcome back, {user.username}! Ready for more communication practice? 🌟')
             return redirect(url_for('dashboard'))
         else:
             flash('Register number not found!')
-    
     return render_template('login.html')
 
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Get user stats
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
-    
-    # Get recent completions
-    recent_activities = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? 
-        ORDER BY completed_at DESC 
-        LIMIT 5
-    ''', (session['user_id'],)).fetchall()
-    
-    # Get today's featured quote
-    today = date.today()
-    featured_quote = conn.execute('''
-        SELECT dq.*, u.username, u.department 
-        FROM daily_quotes dq 
-        JOIN users u ON dq.posted_by = u.id 
-        WHERE dq.post_date = ? AND dq.is_featured = TRUE 
-        ORDER BY dq.created_at ASC 
-        LIMIT 1
-    ''', (today,)).fetchone()
-    
-    # Calculate badges
-    badges = calculate_badge_progress(session['user_id'])
-    
-    # Get active tasks for user's department or ALL
-    tasks = conn.execute('''
-        SELECT * FROM tasks 
-        WHERE is_active = TRUE 
-          AND (department = 'ALL' OR department = ?) 
-        ORDER BY 
-          CASE WHEN due_date IS NULL THEN 1 ELSE 0 END,
-          due_date ASC,
-          created_at DESC
-        LIMIT 10
-    ''', (session['department'],)).fetchall()
 
-    conn.close()
-    
+    user = User.query.get(session['user_id'])
+    recent_activities = UserCompletion.query.filter_by(user_id=user.id).order_by(UserCompletion.completed_at.desc()).limit(5).all()
+
+    today = date.today()
+    featured_quote = db.session.query(DailyQuote, User).join(User, DailyQuote.posted_by == User.id).\
+        filter(DailyQuote.post_date == today, DailyQuote.is_featured == True).\
+        order_by(DailyQuote.created_at.asc()).first()
+    # featured_quote may be tuple (DailyQuote, User) or None
+    if featured_quote:
+        featured_quote_obj, featured_user = featured_quote
+    else:
+        featured_quote_obj = None
+        featured_user = None
+
+    badges = calculate_badge_progress(session['user_id'])
+
+    tasks = Task.query.filter(
+        Task.is_active == True,
+        or_(Task.department == 'ALL', Task.department == session.get('department', 'ALL'))
+    ).order_by(
+        # mimic ordering: due_date null last, then due_date asc, created_at desc
+        Task.due_date.is_(None), Task.due_date.asc(), Task.created_at.desc()
+    ).limit(10).all()
+
     certificate_ready = is_certificate_ready(session['user_id'])
-    return render_template('dashboard.html', 
-                         user=user, 
-                         activities=recent_activities, 
-                         featured_quote=featured_quote,
-                         badges=badges,
-                         tasks=tasks,
-                         certificate_ready=certificate_ready)
+
+    return render_template(
+        'dashboard.html',
+        user=user,
+        activities=recent_activities,
+        featured_quote=featured_quote_obj,
+        featured_quote_user=featured_user,
+        badges=badges,
+        tasks=tasks,
+        certificate_ready=certificate_ready
+    )
 
 @app.route('/speaking')
 def speaking_module():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Get available biographies
-    biographies = conn.execute('SELECT * FROM biographies ORDER BY created_at DESC').fetchall()
-    
-    # Get completed biographies
-    completed = conn.execute('''
-        SELECT content_id FROM user_completions 
-        WHERE user_id = ? AND module_type = "speaking"
-    ''', (session['user_id'],)).fetchall()
-    
-    completed_ids = [row['content_id'] for row in completed]
-    
-    conn.close()
-    
+    biographies = Biography.query.order_by(Biography.created_at.desc()).all()
+    completed = db.session.query(UserCompletion.content_id).filter_by(user_id=session['user_id'], module_type='speaking').all()
+    completed_ids = [c[0] for c in completed]
     return render_template('speaking.html', biographies=biographies, completed_ids=completed_ids)
 
 @app.route('/speaking/<int:bio_id>')
 def speaking_practice(bio_id):
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Check if already completed
-    completed = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "speaking" AND content_id = ?
-    ''', (session['user_id'], bio_id)).fetchone()
-    
+    completed = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='speaking', content_id=bio_id).first()
     if completed:
         flash('You have already completed this speaking practice! ✅')
         return redirect(url_for('speaking_module'))
-    
-    biography = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
-    conn.close()
-    
+    biography = Biography.query.get(bio_id)
     if not biography:
         flash('Biography not found!')
         return redirect(url_for('speaking_module'))
-    
     return render_template('speaking_practice.html', biography=biography)
 
 @app.route('/submit_speaking', methods=['POST'])
 def submit_speaking():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    bio_id = request.form['bio_id']
-    recorded_text = request.form['recorded_text']
-    
-    conn = get_db_connection()
-    
-    # Check if already completed this practice
-    existing = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "speaking" AND content_id = ?
-    ''', (session['user_id'], bio_id)).fetchone()
-    
+
+    bio_id = int(request.form['bio_id'])
+    recorded_text = request.form.get('recorded_text', '').strip()
+
+    existing = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='speaking', content_id=bio_id).first()
     if existing:
-        conn.close()
         flash('🚫 You have already completed this practice! Try a different one.')
         return redirect(url_for('speaking_module'))
-    
-    biography = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
-    
+
+    biography = Biography.query.get(bio_id)
+    if not biography:
+        flash('Biography not found!')
+        return redirect(url_for('speaking_module'))
+
     try:
-        # Use Gemini AI for real analysis
         sentiment_result = analyze_sentiment(recorded_text)
         detailed_feedback = analyze_communication_practice(recorded_text, 'speaking')
-        
-        # Calculate similarity percentage with AI enhancement
-        original_words = set(biography['content'].lower().split())
+
+        original_words = set(biography.content.lower().split())
         user_words = set(recorded_text.lower().split())
         similarity = len(original_words.intersection(user_words)) / max(len(original_words), 1) * 100
-        
-        # Award 10 points for completion, bonus for high performance
+
         points_earned = 10
         if similarity >= 80 and sentiment_result.rating >= 4:
-            points_earned = 15  # Bonus for excellent performance
+            points_earned = 15
         elif similarity >= 60 or sentiment_result.rating >= 3:
-            points_earned = 12  # Good effort bonus
-        
-        final_score = min(100, similarity + sentiment_result.rating * 10)
-        
+            points_earned = 12
+
+        final_score = int(min(100, similarity + sentiment_result.rating * 10))
     except Exception as e:
         # Fallback if AI fails
-        original_words = biography['content'].lower().split()
+        original_words = biography.content.lower().split()
         user_words = recorded_text.lower().split()
         matching_words = sum(1 for word in user_words if word in original_words)
         similarity = (matching_words / len(original_words)) * 100 if original_words else 0
         points_earned = 10 if similarity >= 70 else 8
-        final_score = similarity
+        final_score = int(similarity)
         detailed_feedback = f"Analysis completed with basic scoring. AI unavailable: {str(e)}"
-    
+
     # Save completion
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'speaking', bio_id, final_score, points_earned))
-    
+    completion = UserCompletion(
+        user_id=session['user_id'],
+        module_type='speaking',
+        content_id=bio_id,
+        score=final_score,
+        points_earned=points_earned
+    )
+    db.session.add(completion)
+
     # Update user points
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    
-    conn.commit()
-    conn.close()
-    
-    # Update user streak and points (use a fresh connection)
-    conn2 = get_db_connection()
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+    db.session.commit()
+
+    # Update streaks
     today = date.today()
-    streak_record = conn2.execute('''
-        SELECT * FROM user_streaks 
-        WHERE user_id = ? AND streak_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    
-    if not streak_record:
-        # First task today
-        conn2.execute('''INSERT INTO user_streaks 
-                       (user_id, streak_date, modules_completed, points_earned)
-                       VALUES (?, ?, 1, ?)''',
-                    (session['user_id'], today, points_earned))
-        
-        # Update current streak
-        yesterday = date.today().replace(day=date.today().day-1) if date.today().day > 1 else None
-        if yesterday:
-            yesterday_record = conn2.execute('''
-                SELECT * FROM user_streaks 
-                WHERE user_id = ? AND streak_date = ?
-            ''', (session['user_id'], yesterday)).fetchone()
-            
-            if yesterday_record:
-                conn2.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
-                           (session['user_id'],))
-            else:
-                conn2.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
-                           (session['user_id'],))
+    streak = UserStreak.query.filter_by(user_id=session['user_id'], streak_date=today).first()
+    if not streak:
+        # Insert new streak record
+        streak = UserStreak(user_id=session['user_id'], streak_date=today, modules_completed=1, points_earned=points_earned)
+        db.session.add(streak)
+
+        # Update current streak: check yesterday
+        yesterday = today - timedelta(days=1)
+        yesterday_record = UserStreak.query.filter_by(user_id=session['user_id'], streak_date=yesterday).first()
+        if yesterday_record:
+            user.current_streak = (user.current_streak or 0) + 1
         else:
-            conn2.execute('UPDATE users SET current_streak = 1 WHERE id = ?',
-                       (session['user_id'],))
-    
-    # Update best streak
-    current_user = conn2.execute('SELECT current_streak FROM users WHERE id = ?', 
-                               (session['user_id'],)).fetchone()
-    conn2.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
-                   WHERE id = ?''', (session['user_id'],))
-    
-    conn2.commit()
-    conn2.close()
-    
+            user.current_streak = 1
+    else:
+        # increment modules_completed
+        streak.modules_completed = (streak.modules_completed or 0) + 1
+        streak.points_earned = (streak.points_earned or 0) + points_earned
+
+    # Update best_streak
+    user.best_streak = max(user.best_streak or 0, user.current_streak or 0)
+
+    db.session.commit()
+
     success_data = {
         'points': points_earned,
         'similarity': similarity,
         'celebration': similarity >= 70,
-        'current_streak': current_user['current_streak'] if current_user else 1
+        'current_streak': user.current_streak or 1
     }
-    
     return jsonify(success_data)
 
 @app.route('/submit_speaking_audio', methods=['POST'])
 def submit_speaking_audio():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
+
     bio_id = request.form.get('bio_id')
     audio_file = request.files.get('audio')
     if not bio_id or not audio_file:
         return jsonify({'error': 'Missing audio or bio_id'}), 400
-    
-    # Enforce attempts: max 3 per user per bio per day
-    conn_attempts = get_db_connection()
-    today = date.today()
-    attempt_count = conn_attempts.execute('''
-        SELECT COUNT(*) AS c FROM speaking_attempts
-        WHERE user_id = ? AND bio_id = ? AND DATE(attempt_at) = DATE(?)
-    ''', (session['user_id'], bio_id, today)).fetchone()['c']
-    if attempt_count >= 10:
-        conn_attempts.close()
-        return jsonify({'error': 'Attempt limit reached. You have already tried 3 times today.'}), 429
-    # Record this attempt regardless of success
-    conn_attempts.execute('''INSERT INTO speaking_attempts (user_id, bio_id) VALUES (?, ?)''',
-                          (session['user_id'], bio_id))
-    conn_attempts.commit()
-    conn_attempts.close()
+    bio_id = int(bio_id)
 
-    # Prefer: accept WAV directly. Fallback: convert using pydub if not WAV.
+    # Attempts limit: using SpeakingAttempt table
+    today = date.today()
+    attempt_count = SpeakingAttempt.query.filter(
+        SpeakingAttempt.user_id == session['user_id'],
+        SpeakingAttempt.bio_id == bio_id,
+        func.date(SpeakingAttempt.attempt_at) == today
+    ).count()
+    if attempt_count >= 10:
+        return jsonify({'error': 'Attempt limit reached. You have already tried 10 times today.'}), 429
+
+    # record attempt
+    attempt = SpeakingAttempt(user_id=session['user_id'], bio_id=bio_id)
+    db.session.add(attempt)
+    db.session.commit()
+
+    # Process audio: try to produce WAV buffer
     raw = audio_file.read()
     wav_buf = None
     try:
@@ -589,18 +521,18 @@ def submit_speaking_audio():
         content_type = (audio_file.mimetype or '').lower()
         src_buf = io.BytesIO(raw)
         src_buf.seek(0)
-        # If client uploaded WAV (our new default), try using it directly
+
         if filename.endswith('.wav') or 'wav' in content_type:
             wav_buf = src_buf
         else:
-            # Try to treat it as WAV directly (some browsers may already produce PCM WAV)
+            # attempt to detect using speech_recognition
             try:
                 with sr.AudioFile(src_buf) as _:
-                    pass
-                wav_buf = src_buf
+                    src_buf.seek(0)
+                    wav_buf = src_buf
             except Exception:
                 wav_buf = None
-        # If still not WAV, convert using pydub (requires ffmpeg)
+
         if wav_buf is None:
             segment = AudioSegment.from_file(io.BytesIO(raw))
             out = io.BytesIO()
@@ -608,12 +540,10 @@ def submit_speaking_audio():
             out.seek(0)
             wav_buf = out
     except Exception as e:
-        hint = (' Ensure FFmpeg is installed and available in PATH, or set env vars '
-                'FFMPEG_BIN (path to ffmpeg.exe) and FFPROBE_BIN (path to ffprobe.exe). '
-                'Download: https://www.gyan.dev/ffmpeg/builds/')
-        return jsonify({'error': f'Audio processing failed: {str(e)}.{hint}'}), 400
-    
-    # Transcribe using SpeechRecognition (Google API)
+        hint = (' Ensure FFmpeg installed and available in PATH, or set FFMPEG_BIN/FFPROBE_BIN env vars.')
+        return jsonify({'error': f'Audio processing failed: {str(e)}. {hint}'}), 400
+
+    # Transcribe
     recognizer = sr.Recognizer()
     try:
         with sr.AudioFile(wav_buf) as source:
@@ -621,27 +551,20 @@ def submit_speaking_audio():
         recorded_text = recognizer.recognize_google(audio_data)
     except Exception as e:
         return jsonify({'error': f'Speech-to-text failed: {str(e)}'}), 400
-    
-    # Now reuse the scoring logic from submit_speaking
-    conn = get_db_connection()
-    # Check duplicate completion
-    existing = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "speaking" AND content_id = ?
-    ''', (session['user_id'], bio_id)).fetchone()
+
+    # reuse scoring logic from submit_speaking
+    existing = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='speaking', content_id=bio_id).first()
     if existing:
-        conn.close()
         return jsonify({'error': 'Already completed'}), 409
-    
-    biography = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
+
+    biography = Biography.query.get(bio_id)
     if not biography:
-        conn.close()
         return jsonify({'error': 'Biography not found'}), 404
-    
+
     try:
         sentiment_result = analyze_sentiment(recorded_text)
         detailed_feedback = analyze_communication_practice(recorded_text, 'speaking')
-        original_words = set(biography['content'].lower().split())
+        original_words = set(biography.content.lower().split())
         user_words = set(recorded_text.lower().split())
         similarity = len(original_words.intersection(user_words)) / max(len(original_words), 1) * 100
         points_earned = 10
@@ -649,44 +572,38 @@ def submit_speaking_audio():
             points_earned = 15
         elif similarity >= 60 or sentiment_result.rating >= 3:
             points_earned = 12
-        final_score = min(100, similarity + sentiment_result.rating * 10)
+        final_score = int(min(100, similarity + sentiment_result.rating * 10))
     except Exception:
-        original_words = biography['content'].lower().split()
+        original_words = biography.content.lower().split()
         user_words = recorded_text.lower().split()
         matching_words = sum(1 for word in user_words if word in original_words)
         similarity = (matching_words / len(original_words)) * 100 if original_words else 0
         points_earned = 10 if similarity >= 70 else 8
-        final_score = similarity
-    
-    # Save completion and points
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'speaking', bio_id, final_score, points_earned))
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    conn.commit()
-    conn.close()
-    
-    # Update streaks using fresh connection
-    conn2 = get_db_connection()
+        final_score = int(similarity)
+
+    # Save completion and update user
+    completion = UserCompletion(user_id=session['user_id'], module_type='speaking', content_id=bio_id,
+                                score=final_score, points_earned=points_earned)
+    db.session.add(completion)
+
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+    db.session.commit()
+
+    # Update streaks
     today = date.today()
-    streak_record = conn2.execute('''
-        SELECT * FROM user_streaks 
-        WHERE user_id = ? AND streak_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    if not streak_record:
-        conn2.execute('''INSERT INTO user_streaks 
-                       (user_id, streak_date, modules_completed, points_earned)
-                       VALUES (?, ?, 1, ?)''',
-                    (session['user_id'], today, points_earned))
-        conn2.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
-                     (session['user_id'],))
-    conn2.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
-                   WHERE id = ?''', (session['user_id'],))
-    conn2.commit()
-    conn2.close()
-    
+    streak = UserStreak.query.filter_by(user_id=session['user_id'], streak_date=today).first()
+    if not streak:
+        streak = UserStreak(user_id=session['user_id'], streak_date=today, modules_completed=1, points_earned=points_earned)
+        db.session.add(streak)
+        user.current_streak = (user.current_streak or 0) + 1
+    else:
+        streak.modules_completed = (streak.modules_completed or 0) + 1
+        streak.points_earned = (streak.points_earned or 0) + points_earned
+
+    user.best_streak = max(user.best_streak or 0, user.current_streak or 0)
+    db.session.commit()
+
     return jsonify({
         'points': points_earned,
         'similarity': similarity,
@@ -698,153 +615,101 @@ def submit_speaking_audio():
 def writing_module():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Get today's quotes by department
+
     today = date.today()
-    department_quotes = conn.execute('''
-        SELECT dq.*, u.username 
-        FROM daily_quotes dq 
-        JOIN users u ON dq.posted_by = u.id 
-        WHERE dq.post_date = ? 
-        ORDER BY dq.department, dq.created_at ASC
-    ''', (today,)).fetchall()
-    
-    # Check if user already posted today
-    user_posted_today = conn.execute('''
-        SELECT * FROM daily_quotes 
-        WHERE posted_by = ? AND post_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    
-    # Get available writing topics
-    topics = conn.execute('SELECT * FROM writing_topics ORDER BY created_at DESC').fetchall()
-    
-    conn.close()
-    
-    return render_template('writing.html', 
-                         department_quotes=department_quotes,
-                         user_posted_today=user_posted_today,
-                         topics=topics)
+    department_quotes = db.session.query(DailyQuote, User).join(User, DailyQuote.posted_by == User.id).\
+        filter(DailyQuote.post_date == today).order_by(DailyQuote.department, DailyQuote.created_at.asc()).all()
+
+    # presence check
+    user_posted_today = DailyQuote.query.filter_by(posted_by=session['user_id'], post_date=today).first()
+
+    topics = WritingTopic.query.order_by(WritingTopic.created_at.desc()).all()
+
+    return render_template('writing.html', department_quotes=department_quotes, user_posted_today=user_posted_today, topics=topics)
 
 @app.route('/submit_quote', methods=['POST'])
 def submit_quote():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    quote = request.form['quote']
-    author = request.form['author']
-    
-    conn = get_db_connection()
+
+    quote = request.form.get('quote', '').strip()
+    author = request.form.get('author', '').strip()
     today = date.today()
-    
-    # Check if user already posted today
-    existing = conn.execute('''
-        SELECT * FROM daily_quotes 
-        WHERE posted_by = ? AND post_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    
+
+    existing = DailyQuote.query.filter_by(posted_by=session['user_id'], post_date=today).first()
     if existing:
         flash('You already posted a quote today!')
         return redirect(url_for('writing_module'))
-    
-    # Check if this is the first quote from this department today
-    dept_quotes_today = conn.execute('''
-        SELECT COUNT(*) as count FROM daily_quotes dq
-        JOIN users u ON dq.posted_by = u.id
-        WHERE u.department = ? AND dq.post_date = ?
-    ''', (session['department'], today)).fetchone()
-    
-    is_first = dept_quotes_today['count'] == 0
+
+    dept_quotes_today_count = db.session.query(DailyQuote).join(User, DailyQuote.posted_by == User.id).\
+        filter(User.department == session['department'], DailyQuote.post_date == today).count()
+    is_first = (dept_quotes_today_count == 0)
     points_earned = 15 if is_first else 10
-    
-    # Insert quote
-    conn.execute('''INSERT INTO daily_quotes 
-                   (quote, author, posted_by, department, post_date, is_featured)
-                   VALUES (?, ?, ?, ?, ?, ?)''',
-                (quote, author, session['user_id'], session['department'], today, is_first))
-    
-    # Save completion
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'writing', 0, 100, points_earned))
-    
-    # Update user points
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    
-    conn.commit()
-    conn.close()
-    
+
+    dq = DailyQuote(quote=quote, author=author, posted_by=session['user_id'], department=session['department'], post_date=today, is_featured=is_first)
+    db.session.add(dq)
+    # save completion (writing module)
+    completion = UserCompletion(user_id=session['user_id'], module_type='writing', content_id=0, score=100, points_earned=points_earned)
+    db.session.add(completion)
+
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+
+    db.session.commit()
+
     if is_first:
         flash('🎉 Congratulations! You are the first from your department to post today! You earned 15 points!')
     else:
         flash(f'Great quote! You earned {points_earned} points! 📝')
-    
+
     return redirect(url_for('writing_module'))
 
 @app.route('/submit_writing', methods=['POST'])
 def submit_writing():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    quote_id = request.form['quote_id']
-    user_response = request.form['user_response']
-    
-    conn = get_db_connection()
-    
-    # Check if already completed this practice
-    existing = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "writing" AND content_id = ?
-    ''', (session['user_id'], quote_id)).fetchone()
-    
+
+    quote_id = int(request.form.get('quote_id'))
+    user_response = request.form.get('user_response', '').strip()
+
+    existing = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='writing', content_id=quote_id).first()
     if existing:
-        conn.close()
         flash('🚫 You have already completed this writing practice! Try a different quote.')
         return redirect(url_for('writing_module'))
-    
-    quote = conn.execute('SELECT * FROM daily_quotes WHERE id = ?', (quote_id,)).fetchone()
-    
+
+    quote = DailyQuote.query.get(quote_id)
+    if not quote:
+        flash('Quote not found.')
+        return redirect(url_for('writing_module'))
+
     try:
-        # Use Gemini AI for real writing analysis
         sentiment_result = analyze_sentiment(user_response)
         detailed_feedback = analyze_communication_practice(user_response, 'writing')
-        
-        # Calculate comprehensive writing score
+
         word_count = len(user_response.split())
-        depth_score = min(100, word_count * 1.5)  # Reward substantial responses
-        quality_score = sentiment_result.rating * 20  # Convert to percentage
+        depth_score = min(100, word_count * 1.5)
+        quality_score = sentiment_result.rating * 20
         final_score = (depth_score + quality_score) / 2
-        
-        # Award 10 points for completion, bonus for exceptional writing
+
         points_earned = 10
         if word_count >= 100 and sentiment_result.rating >= 4:
-            points_earned = 15  # Excellent writing bonus
+            points_earned = 15
         elif word_count >= 75 or sentiment_result.rating >= 3:
-            points_earned = 12  # Good writing bonus
-        
+            points_earned = 12
     except Exception as e:
-        # Fallback scoring
         word_count = len(user_response.split())
         final_score = min(100, word_count * 2)
         points_earned = 10 if word_count >= 50 else 8
         detailed_feedback = f"Writing evaluated with basic scoring. AI unavailable: {str(e)}"
-    
-    # Save completion
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'writing', quote_id, final_score, points_earned))
-    
-    # Update user points
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    
-    conn.commit()
-    conn.close()
-    
+
+    completion = UserCompletion(user_id=session['user_id'], module_type='writing', content_id=quote_id, score=int(final_score), points_earned=points_earned)
+    db.session.add(completion)
+
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+
+    db.session.commit()
+
     flash(f'🎉 Writing practice completed! Points earned: {points_earned} | Score: {final_score:.1f}%')
     return redirect(url_for('writing_module'))
 
@@ -852,337 +717,201 @@ def submit_writing():
 def listening_module():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Get available listening content
-    listening_items = conn.execute('SELECT * FROM listening_content ORDER BY created_at DESC').fetchall()
-    
-    # Get completed items
-    completed = conn.execute('''
-        SELECT content_id FROM user_completions 
-        WHERE user_id = ? AND module_type = "listening"
-    ''', (session['user_id'],)).fetchall()
-    
-    completed_ids = [row['content_id'] for row in completed]
-    
-    conn.close()
-    
+
+    listening_items = ListeningContent.query.order_by(ListeningContent.created_at.desc()).all()
+    completed = db.session.query(UserCompletion.content_id).filter_by(user_id=session['user_id'], module_type='listening').all()
+    completed_ids = [c[0] for c in completed]
     return render_template('listening.html', listening_items=listening_items, completed_ids=completed_ids)
 
 @app.route('/listening/<int:content_id>')
 def listening_practice(content_id):
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Check if already completed
-    completed = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "listening" AND content_id = ?
-    ''', (session['user_id'], content_id)).fetchone()
-    
+
+    completed = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='listening', content_id=content_id).first()
     if completed:
         flash('You have already completed this listening practice! ✅')
         return redirect(url_for('listening_module'))
-    
-    content = conn.execute('SELECT * FROM listening_content WHERE id = ?', (content_id,)).fetchone()
-    conn.close()
-    
+
+    content = ListeningContent.query.get(content_id)
     if not content:
         flash('Content not found!')
         return redirect(url_for('listening_module'))
-    
+
     return render_template('listening_practice.html', content=content)
 
 @app.route('/submit_listening', methods=['POST'])
 def submit_listening():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    content_id = request.form['content_id']
-    user_input = request.form['user_input']
-    
-    conn = get_db_connection()
-    
-    # Check if already completed this practice
-    existing = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "listening" AND content_id = ?
-    ''', (session['user_id'], content_id)).fetchone()
-    
+
+    content_id = int(request.form.get('content_id'))
+    user_input = request.form.get('user_input', '').strip()
+
+    existing = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='listening', content_id=content_id).first()
     if existing:
-        conn.close()
         flash('🚫 You have already completed this listening practice! Try a different one.')
         return redirect(url_for('listening_module'))
-    
-    content = conn.execute('SELECT * FROM listening_content WHERE id = ?', (content_id,)).fetchone()
-    
+
+    content = ListeningContent.query.get(content_id)
+    if not content:
+        flash('Content not found.')
+        return redirect(url_for('listening_module'))
+
     try:
-        # Use Gemini AI for listening comprehension analysis
         sentiment_result = analyze_sentiment(user_input)
         detailed_feedback = analyze_communication_practice(user_input, 'listening')
-        
-        # Calculate accuracy with AI enhancement
-        original_text = content['transcript'].lower().strip()
+
+        original_text = content.transcript.lower().strip()
         user_text = user_input.lower().strip()
-        
-        # Word-level accuracy
         original_words = set(original_text.split())
         user_words = set(user_text.split())
         word_accuracy = len(original_words.intersection(user_words)) / max(len(original_words), 1) * 100
-        
-        # Combined scoring
+
         accuracy = min(100, (word_accuracy + sentiment_result.rating * 15) / 2)
         points_earned = 10 if accuracy >= 80 else 8
-        
     except Exception as e:
-        # Fallback accuracy calculation
-        original_text = content['transcript'].lower().strip()
+        original_text = content.transcript.lower().strip()
         user_text = user_input.lower().strip()
-        accuracy = (100 if original_text == user_text else 
-                   80 if len(user_text) > 0 and original_text in user_text else
-                   60 if len(user_text) > 0 else 0)
+        accuracy = (100 if original_text == user_text else
+                    80 if len(user_text) > 0 and original_text in user_text else
+                    60 if len(user_text) > 0 else 0)
         points_earned = 10 if accuracy >= 80 else 8
-    
-    # Save completion
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'listening', content_id, accuracy, points_earned))
-    
-    # Update user points
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    
-    conn.commit()
-    conn.close()
-    
-    # Update user streak and points
+
+    completion = UserCompletion(user_id=session['user_id'], module_type='listening', content_id=content_id, score=int(accuracy), points_earned=points_earned)
+    db.session.add(completion)
+
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+
+    # update streaks similar to speaking
     today = date.today()
-    streak_record = conn.execute('''
-        SELECT * FROM user_streaks 
-        WHERE user_id = ? AND streak_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    
-    if not streak_record:
-        conn.execute('''INSERT INTO user_streaks 
-                       (user_id, streak_date, modules_completed, points_earned)
-                       VALUES (?, ?, 1, ?)''',
-                    (session['user_id'], today, points_earned))
-        conn.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
-                   (session['user_id'],))
-    
-    # Update best streak
-    conn.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
-                   WHERE id = ?''', (session['user_id'],))
-    
-    conn.commit()
-    conn.close()
-    
-    success_data = {
-        'points': points_earned,
-        'accuracy': accuracy,
-        'celebration': accuracy >= 80
-    }
-    
+    streak = UserStreak.query.filter_by(user_id=session['user_id'], streak_date=today).first()
+    if not streak:
+        streak = UserStreak(user_id=session['user_id'], streak_date=today, modules_completed=1, points_earned=points_earned)
+        db.session.add(streak)
+        user.current_streak = (user.current_streak or 0) + 1
+    else:
+        streak.modules_completed = (streak.modules_completed or 0) + 1
+        streak.points_earned = (streak.points_earned or 0) + points_earned
+
+    user.best_streak = max(user.best_streak or 0, user.current_streak or 0)
+    db.session.commit()
+
+    success_data = {'points': points_earned, 'accuracy': accuracy, 'celebration': accuracy >= 80}
     return jsonify(success_data)
 
 @app.route('/observation')
 def observation_module():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Get available observation content
-    observation_items = conn.execute('SELECT * FROM observation_content ORDER BY created_at DESC').fetchall()
-    
-    # Get completed items
-    completed = conn.execute('''
-        SELECT content_id FROM user_completions 
-        WHERE user_id = ? AND module_type = "observation"
-    ''', (session['user_id'],)).fetchall()
-    
-    completed_ids = [row['content_id'] for row in completed]
-    
-    conn.close()
-    
+    observation_items = ObservationContent.query.order_by(ObservationContent.created_at.desc()).all()
+    completed = db.session.query(UserCompletion.content_id).filter_by(user_id=session['user_id'], module_type='observation').all()
+    completed_ids = [c[0] for c in completed]
     return render_template('observation.html', observation_items=observation_items, completed_ids=completed_ids)
 
 @app.route('/observation/<int:content_id>')
 def observation_practice(content_id):
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    conn = get_db_connection()
-    
-    # Check if already completed
-    completed = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "observation" AND content_id = ?
-    ''', (session['user_id'], content_id)).fetchone()
-    
+    completed = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='observation', content_id=content_id).first()
     if completed:
         flash('You have already completed this observation practice! ✅')
         return redirect(url_for('observation_module'))
-    
-    content = conn.execute('SELECT * FROM observation_content WHERE id = ?', (content_id,)).fetchone()
-    conn.close()
-    
+    content = ObservationContent.query.get(content_id)
     if not content:
         flash('Content not found!')
         return redirect(url_for('observation_module'))
-    
     return render_template('observation_practice.html', content=content)
 
 @app.route('/submit_observation', methods=['POST'])
 def submit_observation():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    
-    content_id = request.form['content_id']
-    user_answer = request.form['user_answer']
-    
-    conn = get_db_connection()
-    
-    # Check if already completed this practice
-    existing = conn.execute('''
-        SELECT * FROM user_completions 
-        WHERE user_id = ? AND module_type = "observation" AND content_id = ?
-    ''', (session['user_id'], content_id)).fetchone()
-    
+    content_id = int(request.form.get('content_id'))
+    user_answer = request.form.get('user_answer', '').strip()
+
+    existing = UserCompletion.query.filter_by(user_id=session['user_id'], module_type='observation', content_id=content_id).first()
     if existing:
-        conn.close()
         flash('🚫 You have already completed this observation practice! Try a different video.')
         return redirect(url_for('observation_module'))
-    
-    content = conn.execute('SELECT * FROM observation_content WHERE id = ?', (content_id,)).fetchone()
-    
+
+    content = ObservationContent.query.get(content_id)
+    if not content:
+        flash('Content not found.')
+        return redirect(url_for('observation_module'))
+
     try:
-        # Use Gemini AI for observation analysis
         sentiment_result = analyze_sentiment(user_answer)
         detailed_feedback = analyze_communication_practice(user_answer, 'observation')
-        
-        # Check answer accuracy with AI enhancement
-        correct_answers = content['correct_answers'].lower()
+
+        correct_answers = content.correct_answers.lower()
         user_answer_lower = user_answer.lower()
-        
-        # Basic accuracy + AI quality assessment
         base_accuracy = 100 if correct_answers in user_answer_lower else 70
-        quality_boost = sentiment_result.rating * 5  # Up to 25 point boost
+        quality_boost = sentiment_result.rating * 5
         accuracy = min(100, base_accuracy + quality_boost)
-        
-        # Award 10 points for completion, bonus for excellent answers
         points_earned = 10 if accuracy >= 90 else 8
-        
-    except Exception as e:
-        # Fallback scoring
-        correct_answers = content['correct_answers'].lower()
+    except Exception:
+        correct_answers = content.correct_answers.lower()
         user_answer_lower = user_answer.lower()
         accuracy = 100 if correct_answers in user_answer_lower else 70
         points_earned = 10 if accuracy == 100 else 8
-    
-    # Save completion
-    conn.execute('''INSERT INTO user_completions 
-                   (user_id, module_type, content_id, score, points_earned)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (session['user_id'], 'observation', content_id, accuracy, points_earned))
-    
-    # Update user points
-    conn.execute('UPDATE users SET total_points = total_points + ? WHERE id = ?',
-                (points_earned, session['user_id']))
-    
-    conn.commit()
-    conn.close()
-    
-    # Update user streak and points  
+
+    completion = UserCompletion(user_id=session['user_id'], module_type='observation', content_id=content_id,
+                                score=int(accuracy), points_earned=points_earned)
+    db.session.add(completion)
+
+    user = User.query.get(session['user_id'])
+    user.total_points = (user.total_points or 0) + points_earned
+
+    # update streaks
     today = date.today()
-    streak_record = conn.execute('''
-        SELECT * FROM user_streaks 
-        WHERE user_id = ? AND streak_date = ?
-    ''', (session['user_id'], today)).fetchone()
-    
-    if not streak_record:
-        conn.execute('''INSERT INTO user_streaks 
-                       (user_id, streak_date, modules_completed, points_earned)
-                       VALUES (?, ?, 1, ?)''',
-                    (session['user_id'], today, points_earned))
-        conn.execute('UPDATE users SET current_streak = current_streak + 1 WHERE id = ?',
-                   (session['user_id'],))
-    
-    # Update best streak
-    conn.execute('''UPDATE users SET best_streak = MAX(best_streak, current_streak) 
-                   WHERE id = ?''', (session['user_id'],))
-    
-    conn.commit()
-    conn.close()
-    
-    success_data = {
-        'points': points_earned,
-        'accuracy': accuracy,
-        'celebration': accuracy == 100
-    }
-    
+    streak = UserStreak.query.filter_by(user_id=session['user_id'], streak_date=today).first()
+    if not streak:
+        streak = UserStreak(user_id=session['user_id'], streak_date=today, modules_completed=1, points_earned=points_earned)
+        db.session.add(streak)
+        user.current_streak = (user.current_streak or 0) + 1
+    else:
+        streak.modules_completed = (streak.modules_completed or 0) + 1
+        streak.points_earned = (streak.points_earned or 0) + points_earned
+
+    user.best_streak = max(user.best_streak or 0, user.current_streak or 0)
+    db.session.commit()
+
+    success_data = {'points': points_earned, 'accuracy': accuracy, 'celebration': accuracy == 100}
     return jsonify(success_data)
 
+# -------------------------
+# Admin routes and content management
+# -------------------------
 @app.route('/admin/login', methods=['GET', 'POST'])
 def admin_login():
     if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        
-        conn = get_db_connection()
-        admin = conn.execute('SELECT * FROM admins WHERE username = ?', (username,)).fetchone()
-        conn.close()
-        
-        if admin and check_password_hash(admin['password_hash'], password):
-            session['admin_id'] = admin['id']
-            session['admin_username'] = admin['username']
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        admin = Admin.query.filter_by(username=username).first()
+        if admin and check_password_hash(admin.password_hash, password):
+            session['admin_id'] = admin.id
+            session['admin_username'] = admin.username
             return redirect(url_for('admin_dashboard'))
         else:
             flash('Invalid credentials!')
-    
     return render_template('admin_login.html')
 
 @app.route('/admin/dashboard')
 def admin_dashboard():
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    
-    conn = get_db_connection()
-    
-    stats = {
-        'total_users': conn.execute('SELECT COUNT(*) FROM users').fetchone()[0],
-        'total_completions': conn.execute('SELECT COUNT(*) FROM user_completions').fetchone()[0],
-        'today_activities': conn.execute('SELECT COUNT(*) FROM user_completions WHERE DATE(completed_at) = DATE("now")').fetchone()[0]
-    }
-    
-    # Recent activities
-    recent_activities = conn.execute('''
-        SELECT uc.*, u.username, u.department 
-        FROM user_completions uc
-        JOIN users u ON uc.user_id = u.id
-        ORDER BY uc.completed_at DESC
-        LIMIT 10
-    ''').fetchall()
-    
-    conn.close()
-    
+
+    total_users = db.session.query(func.count(User.id)).scalar() or 0
+    total_completions = db.session.query(func.count(UserCompletion.id)).scalar() or 0
+    today = date.today()
+    today_activities = db.session.query(func.count(UserCompletion.id)).filter(func.date(UserCompletion.completed_at) == today).scalar() or 0
+
+    recent_activities = db.session.query(UserCompletion, User).join(User, UserCompletion.user_id == User.id).order_by(UserCompletion.completed_at.desc()).limit(10).all()
+
+    stats = {'total_users': total_users, 'total_completions': total_completions, 'today_activities': today_activities}
     return render_template('admin_dashboard.html', stats=stats, activities=recent_activities)
-
-# ---------- Admin: Add Content Routes ----------
-from werkzeug.utils import secure_filename
-
-UPLOAD_DIR = os.path.join('static', 'audio')
-ALLOWED_AUDIO_EXTS = {'.mp3', '.wav', '.ogg', '.m4a', '.webm'}
-
-def ensure_upload_dir():
-    try:
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-    except Exception:
-        pass
 
 @app.route('/admin/speaking/new', methods=['GET', 'POST'])
 def admin_add_speaking():
@@ -1196,12 +925,9 @@ def admin_add_speaking():
         if not person_name or not content:
             flash('Person name and script are required')
         else:
-            conn = get_db_connection()
-            conn.execute('''INSERT INTO biographies (title, person_name, content, profession, created_by)
-                            VALUES (?, ?, ?, ?, ?)''',
-                         (title or f"About {person_name}", person_name, content, profession, session['admin_id']))
-            conn.commit()
-            conn.close()
+            bio = Biography(title=title or f"About {person_name}", person_name=person_name, content=content, profession=profession, created_by=session['admin_id'])
+            db.session.add(bio)
+            db.session.commit()
             flash('Speaking topic added')
             return redirect(url_for('admin_add_speaking'))
     return render_template('admin_add_speaking.html')
@@ -1227,12 +953,9 @@ def admin_add_listening():
                 filename = f"{int(datetime.now().timestamp())}_{name}"
                 path = os.path.join(UPLOAD_DIR, filename)
                 audio.save(path)
-                conn = get_db_connection()
-                conn.execute('''INSERT INTO listening_content (title, audio_file, transcript, robot_character, created_by)
-                                VALUES (?, ?, ?, ?, ?)''',
-                             (title, filename, transcript, robot_character, session['admin_id']))
-                conn.commit()
-                conn.close()
+                item = ListeningContent(title=title, audio_file=filename, transcript=transcript, robot_character=robot_character, created_by=session['admin_id'])
+                db.session.add(item)
+                db.session.commit()
                 flash('Listening content added')
                 return redirect(url_for('admin_add_listening'))
     return render_template('admin_add_listening.html')
@@ -1249,12 +972,9 @@ def admin_add_observation():
         if not title or not video_url or not questions or not correct_answers:
             flash('All fields are required')
         else:
-            conn = get_db_connection()
-            conn.execute('''INSERT INTO observation_content (title, video_url, questions, correct_answers, created_by)
-                            VALUES (?, ?, ?, ?, ?)''',
-                         (title, video_url, questions, correct_answers, session['admin_id']))
-            conn.commit()
-            conn.close()
+            item = ObservationContent(title=title, video_url=video_url, questions=questions, correct_answers=correct_answers, created_by=session['admin_id'])
+            db.session.add(item)
+            db.session.commit()
             flash('Observation content added')
             return redirect(url_for('admin_add_observation'))
     return render_template('admin_add_observation.html')
@@ -1269,12 +989,9 @@ def admin_add_writing():
         if not topic:
             flash('Topic is required')
         else:
-            conn = get_db_connection()
-            conn.execute('''INSERT INTO writing_topics (topic, description, created_by)
-                            VALUES (?, ?, ?)''',
-                         (topic, description, session['admin_id']))
-            conn.commit()
-            conn.close()
+            t = WritingTopic(topic=topic, description=description, created_by=session['admin_id'])
+            db.session.add(t)
+            db.session.commit()
             flash('Writing topic added')
             return redirect(url_for('admin_add_writing'))
     return render_template('admin_add_writing.html')
@@ -1308,13 +1025,10 @@ def admin_tts():
             tts.save(output_path)
             flash(f'Audio generated successfully: {output_filename}', 'success')
             if make_listening and title:
-                conn = get_db_connection()
-                conn.execute('''INSERT INTO listening_content (title, audio_file, transcript, robot_character, created_by)
-                                VALUES (?, ?, ?, ?, ?)''',
-                             (title, output_filename, text, robot_character, session['admin_id']))
-                conn.commit()
-                created_listening_id = conn.execute('SELECT last_insert_rowid() as id').fetchone()['id']
-                conn.close()
+                item = ListeningContent(title=title, audio_file=output_filename, transcript=text, robot_character=robot_character, created_by=session['admin_id'])
+                db.session.add(item)
+                db.session.commit()
+                created_listening_id = item.id
                 flash('Listening content created from generated audio.', 'success')
         except Exception as e:
             error = str(e)
@@ -1325,14 +1039,13 @@ def admin_tts():
 def admin_tasks():
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    
-    conn = get_db_connection()
+
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         description = request.form.get('description', '').strip()
         department = request.form.get('department', 'ALL').strip() or 'ALL'
         due_date = request.form.get('due_date') or None
-        is_active = 1 if request.form.get('is_active') == 'on' else 1  # default active
+        is_active = True if request.form.get('is_active') == 'on' else True
         module_type = request.form.get('module_type') or None
         content_id = request.form.get('content_id') or None
         if content_id:
@@ -1340,50 +1053,40 @@ def admin_tasks():
                 content_id = int(content_id)
             except ValueError:
                 content_id = None
-        
+
         if not title:
             flash('Task title is required')
         else:
-            conn.execute('''INSERT INTO tasks (title, description, department, due_date, is_active, created_by, module_type, content_id)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                         (title, description, department, due_date, is_active, session['admin_id'], module_type, content_id))
-            conn.commit()
+            task = Task(title=title, description=description, department=department, due_date=due_date,
+                        is_active=is_active, created_by=session['admin_id'], module_type=module_type, content_id=content_id)
+            db.session.add(task)
+            db.session.commit()
             flash('Task added successfully')
-            
-    # List recent tasks
-    tasks = conn.execute('''SELECT t.*, a.username AS admin_name FROM tasks t
-                            LEFT JOIN admins a ON t.created_by = a.id
-                            ORDER BY t.created_at DESC
-                            LIMIT 50''').fetchall()
 
-    # Load content lists for linking
-    biographies = conn.execute('SELECT id, person_name AS name, title FROM biographies ORDER BY created_at DESC').fetchall()
-    listening_items = conn.execute('SELECT id, title FROM listening_content ORDER BY created_at DESC').fetchall()
-    observation_items = conn.execute('SELECT id, title FROM observation_content ORDER BY created_at DESC').fetchall()
-    writing_topics = conn.execute('SELECT id, topic AS title FROM writing_topics ORDER BY created_at DESC').fetchall()
-    conn.close()
-    return render_template('admin_tasks.html', tasks=tasks,
-                           biographies=biographies,
-                           listening_items=listening_items,
-                           observation_items=observation_items,
-                           writing_topics=writing_topics)
+    tasks = Task.query.order_by(Task.created_at.desc()).limit(50).all()
+    biographies = Biography.query.with_entities(Biography.id, Biography.person_name, Biography.title).order_by(Biography.created_at.desc()).all()
+    listening_items = ListeningContent.query.with_entities(ListeningContent.id, ListeningContent.title).order_by(ListeningContent.created_at.desc()).all()
+    observation_items = ObservationContent.query.with_entities(ObservationContent.id, ObservationContent.title).order_by(ObservationContent.created_at.desc()).all()
+    writing_topics = WritingTopic.query.with_entities(WritingTopic.id, WritingTopic.topic).order_by(WritingTopic.created_at.desc()).all()
+
+    return render_template('admin_tasks.html', tasks=tasks, biographies=biographies,
+                           listening_items=listening_items, observation_items=observation_items, writing_topics=writing_topics)
 
 @app.route('/admin/tasks/<int:task_id>/edit', methods=['GET', 'POST'])
 def admin_edit_task(task_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
+    task = Task.query.get(task_id)
     if not task:
-        conn.close()
         flash('Task not found')
         return redirect(url_for('admin_tasks'))
+
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
         description = request.form.get('description', '').strip()
         department = request.form.get('department', 'ALL').strip() or 'ALL'
         due_date = request.form.get('due_date') or None
-        is_active = 1 if request.form.get('is_active') == 'on' else 0
+        is_active = True if request.form.get('is_active') == 'on' else False
         module_type = request.form.get('module_type') or None
         content_id = request.form.get('content_id') or None
         if content_id:
@@ -1391,47 +1094,44 @@ def admin_edit_task(task_id):
                 content_id = int(content_id)
             except ValueError:
                 content_id = None
+
         if not title:
             flash('Task title is required')
         else:
-            conn.execute('''UPDATE tasks SET title=?, description=?, department=?, due_date=?, is_active=?, module_type=?, content_id=?
-                            WHERE id = ?''',
-                         (title, description, department, due_date, is_active, module_type, content_id, task_id))
-            conn.commit()
+            task.title = title
+            task.description = description
+            task.department = department
+            task.due_date = due_date
+            task.is_active = is_active
+            task.module_type = module_type
+            task.content_id = content_id
+            db.session.commit()
             flash('Task updated')
-            # reload task
-            task = conn.execute('SELECT * FROM tasks WHERE id = ?', (task_id,)).fetchone()
-    # content lists
-    biographies = conn.execute('SELECT id, person_name AS name, title FROM biographies ORDER BY created_at DESC').fetchall()
-    listening_items = conn.execute('SELECT id, title FROM listening_content ORDER BY created_at DESC').fetchall()
-    observation_items = conn.execute('SELECT id, title FROM observation_content ORDER BY created_at DESC').fetchall()
-    writing_topics = conn.execute('SELECT id, topic AS title FROM writing_topics ORDER BY created_at DESC').fetchall()
-    conn.close()
-    return render_template('admin_task_edit.html', task=task,
-                           biographies=biographies,
-                           listening_items=listening_items,
-                           observation_items=observation_items,
-                           writing_topics=writing_topics)
+            return redirect(url_for('admin_tasks'))
+
+    biographies = Biography.query.with_entities(Biography.id, Biography.person_name, Biography.title).order_by(Biography.created_at.desc()).all()
+    listening_items = ListeningContent.query.with_entities(ListeningContent.id, ListeningContent.title).order_by(ListeningContent.created_at.desc()).all()
+    observation_items = ObservationContent.query.with_entities(ObservationContent.id, ObservationContent.title).order_by(ObservationContent.created_at.desc()).all()
+    writing_topics = WritingTopic.query.with_entities(WritingTopic.id, WritingTopic.topic).order_by(WritingTopic.created_at.desc()).all()
+
+    return render_template('admin_task_edit.html', task=task, biographies=biographies,
+                           listening_items=listening_items, observation_items=observation_items, writing_topics=writing_topics)
 
 @app.route('/admin/practices')
 def admin_manage_practices():
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    speaking = conn.execute('SELECT * FROM biographies ORDER BY created_at DESC').fetchall()
-    listening = conn.execute('SELECT * FROM listening_content ORDER BY created_at DESC').fetchall()
-    observation = conn.execute('SELECT * FROM observation_content ORDER BY created_at DESC').fetchall()
-    conn.close()
+    speaking = Biography.query.order_by(Biography.created_at.desc()).all()
+    listening = ListeningContent.query.order_by(ListeningContent.created_at.desc()).all()
+    observation = ObservationContent.query.order_by(ObservationContent.created_at.desc()).all()
     return render_template('admin_manage_practices.html', speaking=speaking, listening=listening, observation=observation)
 
 @app.route('/admin/speaking/<int:bio_id>/edit', methods=['GET', 'POST'])
 def admin_edit_speaking(bio_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    bio = conn.execute('SELECT * FROM biographies WHERE id = ?', (bio_id,)).fetchone()
+    bio = Biography.query.get(bio_id)
     if not bio:
-        conn.close()
         flash('Speaking passage not found', 'error')
         return redirect(url_for('admin_manage_practices'))
     if request.method == 'POST':
@@ -1439,69 +1139,65 @@ def admin_edit_speaking(bio_id):
         title = request.form.get('title', '').strip()
         profession = request.form.get('profession', 'Other').strip() or 'Other'
         content = request.form.get('content', '').strip()
-        conn.execute('''UPDATE biographies SET person_name = ?, title = ?, profession = ?, content = ? WHERE id = ?''',
-                     (person_name, title, profession, content, bio_id))
-        conn.commit()
-        conn.close()
+        bio.person_name = person_name
+        bio.title = title
+        bio.profession = profession
+        bio.content = content
+        db.session.commit()
         flash('Speaking passage updated', 'success')
         return redirect(url_for('admin_manage_practices'))
-    conn.close()
     return render_template('admin_edit_speaking.html', bio=bio)
 
 @app.route('/admin/speaking/<int:bio_id>/delete', methods=['POST'])
 def admin_delete_speaking(bio_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    conn.execute('DELETE FROM biographies WHERE id = ?', (bio_id,))
-    conn.commit()
-    conn.close()
-    flash('Speaking passage removed', 'success')
+    bio = Biography.query.get(bio_id)
+    if bio:
+        db.session.delete(bio)
+        db.session.commit()
+        flash('Speaking passage removed', 'success')
     return redirect(url_for('admin_manage_practices'))
 
 @app.route('/admin/listening/<int:content_id>/edit', methods=['GET', 'POST'])
 def admin_edit_listening(content_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    item = conn.execute('SELECT * FROM listening_content WHERE id = ?', (content_id,)).fetchone()
+    item = ListeningContent.query.get(content_id)
     if not item:
-        conn.close()
         flash('Listening content not found', 'error')
         return redirect(url_for('admin_manage_practices'))
     if request.method == 'POST':
         title = request.form.get('title', '').strip()
-        audio_file = request.form.get('audio_file', '').strip() or item['audio_file']
+        audio_file = request.form.get('audio_file', '').strip() or item.audio_file
         transcript = request.form.get('transcript', '').strip()
         robot_character = request.form.get('robot_character', 'boy').strip() or 'boy'
-        conn.execute('''UPDATE listening_content SET title = ?, audio_file = ?, transcript = ?, robot_character = ? WHERE id = ?''',
-                     (title, audio_file, transcript, robot_character, content_id))
-        conn.commit()
-        conn.close()
+        item.title = title
+        item.audio_file = audio_file
+        item.transcript = transcript
+        item.robot_character = robot_character
+        db.session.commit()
         flash('Listening content updated', 'success')
         return redirect(url_for('admin_manage_practices'))
-    conn.close()
     return render_template('admin_edit_listening.html', item=item)
 
 @app.route('/admin/listening/<int:content_id>/delete', methods=['POST'])
 def admin_delete_listening(content_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    conn.execute('DELETE FROM listening_content WHERE id = ?', (content_id,))
-    conn.commit()
-    conn.close()
-    flash('Listening content removed', 'success')
+    item = ListeningContent.query.get(content_id)
+    if item:
+        db.session.delete(item)
+        db.session.commit()
+        flash('Listening content removed', 'success')
     return redirect(url_for('admin_manage_practices'))
 
 @app.route('/admin/observation/<int:obs_id>/edit', methods=['GET', 'POST'])
 def admin_edit_observation(obs_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    item = conn.execute('SELECT * FROM observation_content WHERE id = ?', (obs_id,)).fetchone()
+    item = ObservationContent.query.get(obs_id)
     if not item:
-        conn.close()
         flash('Observation content not found', 'error')
         return redirect(url_for('admin_manage_practices'))
     if request.method == 'POST':
@@ -1509,78 +1205,64 @@ def admin_edit_observation(obs_id):
         video_url = request.form.get('video_url', '').strip()
         questions = request.form.get('questions', '').strip()
         correct_answers = request.form.get('correct_answers', '').strip()
-        conn.execute('''UPDATE observation_content SET title = ?, video_url = ?, questions = ?, correct_answers = ? WHERE id = ?''',
-                     (title, video_url, questions, correct_answers, obs_id))
-        conn.commit()
-        conn.close()
+        item.title = title
+        item.video_url = video_url
+        item.questions = questions
+        item.correct_answers = correct_answers
+        db.session.commit()
         flash('Observation content updated', 'success')
         return redirect(url_for('admin_manage_practices'))
-    conn.close()
     return render_template('admin_edit_observation.html', item=item)
 
 @app.route('/admin/observation/<int:obs_id>/delete', methods=['POST'])
 def admin_delete_observation(obs_id):
     if 'admin_id' not in session:
         return redirect(url_for('admin_login'))
-    conn = get_db_connection()
-    conn.execute('DELETE FROM observation_content WHERE id = ?', (obs_id,))
-    conn.commit()
-    conn.close()
-    flash('Observation content removed', 'success')
+    item = ObservationContent.query.get(obs_id)
+    if item:
+        db.session.delete(item)
+        db.session.commit()
+        flash('Observation content removed', 'success')
     return redirect(url_for('admin_manage_practices'))
 
 @app.route('/leaderboard')
 def leaderboard():
-    conn = get_db_connection()
-    
-    # Get top users by points
-    top_users = conn.execute('''
-        SELECT username, department, total_points, current_streak, best_streak, badges
-        FROM users 
-        ORDER BY total_points DESC 
-        LIMIT 10
-    ''').fetchall()
-    
-    conn.close()
-    
+    top_users = User.query.order_by(User.total_points.desc()).limit(10).all()
     return render_template('leaderboard.html', top_users=top_users)
 
-# -------- Profile and Certificate Routes --------
 @app.route('/profile', methods=['GET', 'POST'])
 def profile():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    user = User.query.get(session['user_id'])
     if request.method == 'POST':
         new_username = request.form.get('username', '').strip()
         new_department = request.form.get('department', '').strip()
         try:
             if new_username:
-                conn.execute('UPDATE users SET username = ? WHERE id = ?', (new_username, session['user_id']))
+                # ensure uniqueness
+                other = User.query.filter(User.username == new_username, User.id != user.id).first()
+                if other:
+                    flash('Username already taken. Please choose another.', 'error')
+                    return redirect(url_for('profile'))
+                user.username = new_username
                 session['username'] = new_username
             if new_department:
-                conn.execute('UPDATE users SET department = ? WHERE id = ?', (new_department, session['user_id']))
+                user.department = new_department
                 session['department'] = new_department
-            conn.commit()
+            db.session.commit()
             flash('Profile updated successfully', 'success')
-            # refresh user
-            user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
-        except sqlite3.IntegrityError:
-            flash('Username already taken. Please choose another.', 'error')
-        finally:
-            conn.close()
+        except Exception as e:
+            db.session.rollback()
+            flash('Failed to update profile.', 'error')
         return redirect(url_for('profile'))
-    conn.close()
     return render_template('profile.html', user=user)
 
 @app.route('/certificate')
 def certificate_view():
     if 'user_id' not in session:
         return redirect(url_for('index'))
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
-    conn.close()
+    user = User.query.get(session['user_id'])
     eligible = is_certificate_ready(session['user_id'])
     today_str = datetime.now().strftime('%Y-%m-%d')
     return render_template('certificate.html', user=user, eligible=eligible, reportlab=REPORTLAB_AVAILABLE, today=today_str)
@@ -1595,27 +1277,21 @@ def certificate_download():
     if not REPORTLAB_AVAILABLE:
         flash('PDF generator is not installed on the server. Use the Print Certificate option.', 'warning')
         return redirect(url_for('certificate_view'))
-    # Generate PDF in-memory
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE id = ?', (session['user_id'],)).fetchone()
-    conn.close()
+
+    user = User.query.get(session['user_id'])
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     width, height = A4
-    # Header
     c.setFont('Helvetica-Bold', 24)
     c.drawCentredString(width/2, height - 3*cm, 'Certificate of Completion')
     c.setFont('Helvetica', 12)
     c.drawCentredString(width/2, height - 4*cm, 'Shakespeare Club - Communication Skills Program')
-    # Recipient
     c.setFont('Helvetica-Bold', 18)
-    c.drawCentredString(width/2, height - 7*cm, f"This certifies that {user['username']}")
+    c.drawCentredString(width/2, height - 7*cm, f"This certifies that {user.username}")
     c.setFont('Helvetica', 12)
-    c.drawCentredString(width/2, height - 8*cm, f"Department: {user['department']}")
-    # Body
+    c.drawCentredString(width/2, height - 8*cm, f"Department: {user.department}")
     c.drawCentredString(width/2, height - 10*cm, 'has successfully completed all practice modules:')
     c.drawCentredString(width/2, height - 11*cm, 'Speaking, Listening, Writing, and Observation')
-    # Footer
     today_str = datetime.now().strftime('%Y-%m-%d')
     c.drawCentredString(width/2, 3*cm, f"Date: {today_str}")
     c.setFont('Helvetica-Oblique', 10)
@@ -1623,15 +1299,12 @@ def certificate_download():
     c.showPage()
     c.save()
     buf.seek(0)
-    filename = f"Certificate_{user['username']}.pdf"
+    filename = f"Certificate_{user.username}.pdf"
     return send_file(buf, as_attachment=True, download_name=filename, mimetype='application/pdf')
 
-# Help mobile browsers by explicitly allowing microphone via headers (useful in iframes/PWAs)
 @app.after_request
 def add_mic_permissions_headers(response):
-    # Permissions-Policy replaces Feature-Policy in modern browsers
     response.headers['Permissions-Policy'] = "microphone=(self)"
-    # For older browsers still reading Feature-Policy
     response.headers['Feature-Policy'] = "microphone 'self'"
     return response
 
@@ -1641,6 +1314,12 @@ def logout():
     flash('Thanks for practicing! Come back soon! 👋')
     return redirect(url_for('index'))
 
+# -------------------------
+# App bootstrap
+# -------------------------
 if __name__ == '__main__':
-    init_db()
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Create tables and sample data when starting locally or on server first time
+    with app.app_context():
+        db.create_all()
+        ensure_sample_data()
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
