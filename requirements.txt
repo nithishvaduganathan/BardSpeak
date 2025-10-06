@@ -6,3 +6,4 @@ SpeechRecognition
 gTTS
 reportlab
 gunicorn
+google_genai
